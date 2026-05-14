@@ -1,0 +1,15 @@
+name: ai_test_flutter_example
+description: Phase 0 probe app for Architecture B (Shadow DOM Projection) validation.
+version: 0.0.1-dev
+publish_to: none
+
+environment:
+  sdk: "^3.6.0"
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ai_test_flutter:
+    path: ../
+  web: ^1.0.0
