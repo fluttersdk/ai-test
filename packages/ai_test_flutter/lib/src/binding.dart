@@ -4,11 +4,11 @@ import 'package:flutter/foundation.dart';
 // Public contract — implemented by the projection layer (Step 10).
 // ---------------------------------------------------------------------------
 
-/// Contract for the object that performs the actual Shadow DOM projection.
+/// Contract for the object that activates AI-test support at runtime.
 ///
 /// [AiTestBinding.ensureInitialized] delegates to [activate] when the
-/// debug-mode + dart-define + URL-query gate passes. Implementation lives in
-/// `Projection` (Step 10); tests supply a spy via this interface.
+/// debug-mode + dart-define + URL-query gate passes. The canonical
+/// implementation is [AiTestPluginV2]; tests supply a spy via this interface.
 abstract class AiTestHost {
   /// Called exactly once after the gate passes.
   ///
@@ -56,17 +56,17 @@ abstract class AiTestHost {
 ///
 /// ```dart
 /// WidgetsFlutterBinding.ensureInitialized();
-/// // Compile-time guard so dart2js tree-shakes Projection + transitive
+/// // Compile-time guard so dart2js tree-shakes AiTestPluginV2 + transitive
 /// // imports out of the release bundle.
 /// if (!kReleaseMode) {
-///   AiTestBinding.ensureInitialized(host: Projection());
+///   AiTestBinding.ensureInitialized(host: AiTestPluginV2());
 /// }
 /// MagicRouter.instance.addObserver(…);
 /// await Magic.init(…);
 /// ```
 ///
-/// The `host:` argument is required to install the projection — passing
-/// `null` (or omitting it) runs the gate but emits no mirror DOM.
+/// The `host:` argument is required to activate AI-test support — passing
+/// `null` (or omitting it) runs the gate but has no side effect.
 class AiTestBinding {
   AiTestBinding._();
 
