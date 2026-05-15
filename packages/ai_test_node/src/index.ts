@@ -1,6 +1,7 @@
 #!/usr/bin/env -S npx tsx
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { existsSync, readFileSync } from 'node:fs';
 import { VmServiceClient } from './vm_service_client.js';
 import { registerAll } from './tools/index.js';
 
@@ -11,11 +12,27 @@ import { registerAll } from './tools/index.js';
 const DEFAULT_VM_SERVICE_URI = 'ws://127.0.0.1:8181/ws';
 
 /**
- * Resolve the VM Service URI from `AI_TEST_VM_SERVICE_URI` or fall back to the
- * default debug endpoint. Hardcoding is forbidden; operators running with
- * `--service-port` or auth-codes-on supply the URI via env.
+ * Path the launch script (`scripts/dev-with-aitest.sh`) writes the live VM
+ * Service URI to. Flutter web ignores `--vm-service-port` + `--disable-service-
+ * auth-codes` and picks a random port with a per-launch auth token, so the URI
+ * cannot be hardcoded. Discovery order: file > env > default.
+ */
+const VM_URI_FILE = '/tmp/ai-test-vm-uri';
+
+/**
+ * Resolve the VM Service URI. Lazy: re-reads the discovery file on every call
+ * so the URI tracks Flutter app restarts without restarting the MCP server.
+ * Falls back to env, then the default endpoint.
  */
 function resolveVmServiceUri(): string {
+    try {
+        if (existsSync(VM_URI_FILE)) {
+            const fromFile = readFileSync(VM_URI_FILE, 'utf8').trim();
+            if (fromFile.length > 0) return fromFile;
+        }
+    } catch {
+        // ignore; fall through to env
+    }
     const fromEnv = process.env.AI_TEST_VM_SERVICE_URI;
     if (fromEnv && fromEnv.length > 0) return fromEnv;
     return DEFAULT_VM_SERVICE_URI;
@@ -29,11 +46,23 @@ function resolveVmServiceUri(): string {
  * until the first tool call hits `getIsolateId()` or `call()`. Concurrent
  * first calls share a single in-flight connect promise.
  */
-function lazyVmClient(uri: string): VmServiceClient {
-    const client = new VmServiceClient(uri);
+function lazyVmClient(uriResolver: () => string): VmServiceClient {
+    // Resolve once for the first connect; if the URI changes later (Flutter
+    // restart writes a new value to VM_URI_FILE), the connection fails on the
+    // next call and we recreate the underlying client transparently.
+    let currentUri = uriResolver();
+    let client = new VmServiceClient(currentUri);
     let connectPromise: Promise<void> | null = null;
 
     const ensureConnected = async (): Promise<void> => {
+        const latestUri = uriResolver();
+        if (latestUri !== currentUri) {
+            // URI changed (Flutter app restarted). Tear down + recreate.
+            await client.disconnect().catch(() => undefined);
+            currentUri = latestUri;
+            client = new VmServiceClient(currentUri);
+            connectPromise = null;
+        }
         if (client.isConnected) return;
         connectPromise ??= client.connect().catch((err: Error) => {
             // Reset so a subsequent call retries (operator restarts the app, etc).
@@ -43,19 +72,29 @@ function lazyVmClient(uri: string): VmServiceClient {
         await connectPromise;
     };
 
-    const originalCall = client.call.bind(client);
-    const originalGetMainIsolateId = client.getMainIsolateId.bind(client);
-
-    client.call = async (method, params) => {
-        await ensureConnected();
-        return originalCall(method, params);
-    };
-    client.getMainIsolateId = async () => {
-        await ensureConnected();
-        return originalGetMainIsolateId();
-    };
-
-    return client;
+    // Returned proxy delegates to the current client instance via closure so
+    // tools always see the live connection even after a URI swap.
+    const proxy = {
+        get isConnected(): boolean {
+            return client.isConnected;
+        },
+        connect: () => ensureConnected(),
+        disconnect: () => client.disconnect(),
+        getMainIsolateId: async (): Promise<string> => {
+            await ensureConnected();
+            return client.getMainIsolateId();
+        },
+        getRootLibId: async (isolateId: string): Promise<string> => {
+            await ensureConnected();
+            return client.getRootLibId(isolateId);
+        },
+        clearRootLibCacheForTests: (): void => client.clearRootLibCacheForTests(),
+        call: async <T>(method: string, params?: object): Promise<T> => {
+            await ensureConnected();
+            return client.call<T>(method, params);
+        },
+    } as unknown as VmServiceClient;
+    return proxy;
 }
 
 /**
@@ -77,7 +116,7 @@ export async function main(): Promise<void> {
         },
     );
 
-    const vmClient = lazyVmClient(resolveVmServiceUri());
+    const vmClient = lazyVmClient(resolveVmServiceUri);
     registerAll(server, vmClient);
 
     const transport = new StdioServerTransport();
