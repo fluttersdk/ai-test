@@ -53,6 +53,15 @@ import 'testid_synthesizer.dart';
 /// reach the form scope by reading `(widget as dynamic).formData`. If the
 /// field becomes private upstream, the synthesizer's label-fallback path
 /// inside [TestidSynthesizer] still produces `input.<snake_case_label>`.
+///
+/// **Single-projection-instance assumption.** The per-frame repaint hook is a
+/// global top-level variable in `package:flutter/rendering.dart`. Each call
+/// to [activate] overwrites the previous assignment; if a second [Projection]
+/// instance calls [activate], its callback replaces the first. V0's
+/// [AiTestBinding._activated] guard already enforces the single-instance
+/// invariant at the call site, so this is safe in practice. Document this
+/// assumption here so future maintainers understand why no attempt is made to
+/// chain or restore the previous callback.
 class Projection implements AiTestHost {
   /// The DOM-mount strategy. Defaults to the platform-conditional factory
   /// from [createGlasspaneMount].
@@ -84,6 +93,18 @@ class Projection implements AiTestHost {
   Map<RenderBox, Rect> _previousRects = const {};
   int _consecutiveStableFrames = 0;
 
+  // -------------------------------------------------------------------------
+  // Per-frame repaint capture (Flutter inspector pattern)
+  // -------------------------------------------------------------------------
+
+  /// Accumulates every [RenderObject] that was painted in the current frame.
+  ///
+  /// Populated by the per-frame repaint hook wired in [activate]. Step 6 reads
+  /// this set to diff-update only the nodes that actually repainted, then
+  /// clears it after each emit. The set is never cleared in this step; Step 6
+  /// owns that lifecycle.
+  final Set<RenderObject> _repaintedThisFrame = <RenderObject>{};
+
   Projection({
     GlasspaneMount? glassPane,
     DomEmitter? emitter,
@@ -102,6 +123,13 @@ class Projection implements AiTestHost {
 
   @override
   void activate() {
+    // Wire the per-frame repaint accumulator BEFORE scheduling the first emit
+    // so the very first painted frame already populates _repaintedThisFrame.
+    // This is a global assignment; see the class docblock for the
+    // single-projection-instance assumption.
+    debugOnProfilePaint = (RenderObject ro) {
+      _repaintedThisFrame.add(ro);
+    };
     _scheduleEmit();
   }
 
@@ -109,6 +137,15 @@ class Projection implements AiTestHost {
   /// exercise the projection without waiting on the scheduler.
   @visibleForTesting
   void runEmitForTesting() => _emit(Duration.zero);
+
+  /// Exposes [_repaintedThisFrame] for chrome-platform tests that assert the
+  /// repaint-set accumulator works as expected.
+  ///
+  /// Do NOT read this from production code. Step 6 will consume and clear the
+  /// set as part of the diff-update loop.
+  @visibleForTesting
+  Set<RenderObject> get debugRepaintedThisFrameForTesting =>
+      _repaintedThisFrame;
 
   // -------------------------------------------------------------------------
   // Frame scheduling
@@ -194,11 +231,22 @@ class Projection implements AiTestHost {
     // dispatch so this package keeps zero compile-time coupling to magic.
     final bool pushedForm = _maybePushFormScope(widget, typeName, formStack);
 
+    // Source-filter: WInput is the inner implementation widget that WFormInput
+    // wraps. When WFormInput is an ancestor, WFormInput already produces the
+    // `input.<fieldName>` mirror; emitting a second mirror for WInput would
+    // create a duplicate testid (the V0 dual-mirror bug). Skip the sink add
+    // for WInput when a WFormInput ancestor is present. Children are still
+    // walked below so inner widgets (e.g. the real TextField) are not skipped.
+    final bool suppressedBySourceFilter =
+        typeName == 'WInput' && _hasWFormInputAncestor(element);
+
     // Resolve the RenderObject this Element is tied to (null for
     // composition-only elements like StatelessElement subtrees we descend
     // through but that don't paint themselves).
     final renderObject = element.renderObject;
-    if (renderObject != null && !sink.containsKey(renderObject)) {
+    if (!suppressedBySourceFilter &&
+        renderObject != null &&
+        !sink.containsKey(renderObject)) {
       final extractedText = _extractText(element);
       final formFieldName = _resolveFormFieldName(widget, typeName, formStack);
 
@@ -218,6 +266,25 @@ class Projection implements AiTestHost {
     if (pushedForm) {
       formStack.removeLast();
     }
+  }
+
+  /// Returns `true` when any ancestor [Element] in [element]'s tree has a
+  /// widget whose [runtimeType] is exactly `WFormInput`.
+  ///
+  /// Used by the WInput source-filter to suppress the inner mirror that
+  /// WFormInput already covers. String comparison avoids a compile-time
+  /// coupling to `package:fluttersdk_wind` (V0 convention).
+  bool _hasWFormInputAncestor(Element element) {
+    bool found = false;
+    element.visitAncestorElements((ancestor) {
+      if (ancestor.widget.runtimeType.toString() == 'WFormInput') {
+        found = true;
+        // Return false to stop the walk once found.
+        return false;
+      }
+      return true;
+    });
+    return found;
   }
 
   bool _maybePushFormScope(
