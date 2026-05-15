@@ -6,5 +6,5 @@ This package installs `AiTestBinding` between `WidgetsFlutterBinding.ensureIniti
 The binding projects a mirror DOM into `flt-glass-pane.shadowRoot` each frame, annotating every visible widget
 with a `data-testid` attribute that Playwright can locate via `getByTestId`.
 
-Active only when `kDebugMode == true` AND either `--dart-define=AI_TEST=1` or `?aiTest=1` URL param is present.
-No-op in release builds; tree-shaken away by the Flutter Web compiler.
+Active only when `kReleaseMode == false` (debug OR profile builds) AND either `--dart-define=AI_TEST=1` or `?aiTest=1` URL param is present.
+No-op in release builds; the call site uses `if (!kReleaseMode) AiTestBinding.ensureInitialized(host: Projection());` so dart2js tree-shakes the entire branch away.

@@ -233,9 +233,11 @@ class Projection implements AiTestHost {
         formStack.add(formData);
         return true;
       }
-    } catch (_) {
-      // formData is private or absent — fall through and let the synthesizer
-      // use the label fallback inside `_extractText` for nested inputs.
+    } on NoSuchMethodError {
+      // formData getter absent or renamed upstream — fall through to label
+      // fallback inside `_extractText` for nested inputs.
+    } on TypeError {
+      // formData exists but is a different type than expected — fall through.
     }
     return false;
   }
@@ -259,7 +261,9 @@ class Projection implements AiTestHost {
     final Map<String, dynamic> data;
     try {
       data = scopeDyn.data as Map<String, dynamic>;
-    } catch (_) {
+    } on NoSuchMethodError {
+      return null;
+    } on TypeError {
       return null;
     }
 
@@ -271,7 +275,9 @@ class Projection implements AiTestHost {
         if (identical(candidate, controller)) {
           return key;
         }
-      } catch (_) {
+      } on AssertionError {
+        // Value-notifier key (bool, MagicFile, etc.) — `[]` operator asserts
+        // it's a text field. Skip and try the next key.
         continue;
       }
     }
@@ -283,9 +289,10 @@ class Projection implements AiTestHost {
       final dynamic dyn = widget;
       final c = dyn.controller as Object?;
       if (c is TextEditingController) return c;
-    } catch (_) {
-      // Widget has no `controller` getter or it threw — not a form input we
-      // can resolve here.
+    } on NoSuchMethodError {
+      // Widget has no `controller` getter — not a form input we can resolve.
+    } on TypeError {
+      // Different controller shape than expected — fall through.
     }
     return null;
   }
@@ -311,8 +318,8 @@ class Projection implements AiTestHost {
             found = value;
             return;
           }
-        } catch (_) {
-          // Different WText shape; ignore and keep searching.
+        } on NoSuchMethodError {
+          // Different WText shape (no `data` field upstream); keep searching.
         }
       }
       node.visitChildElements(visit);

@@ -85,8 +85,8 @@ V0 measured p95 = 5.7 ms against a 3 ms target on a static screen with full re-e
 
 | Item | Detail |
 |---|---|
-| Plan steps executed | 14 of 15 (Step 15 final verification pending) |
-| Waves completed | 8 of 9 (Wave 9 = this document) |
-| Plan revisions during execution | 2 (dev_dependencies lint → `dependencies:`; `kDebugMode` → `!kReleaseMode` for profile builds) |
+| Plan steps executed | 15 of 15 |
+| Waves completed | 9 of 9 (plus Final Verification Wave) |
+| Plan revisions during execution | 3 (dev_dependencies lint → `dependencies:`; `kDebugMode` → `!kReleaseMode` for profile builds; runtime gate → compile-time `if (!kReleaseMode)` at call site for tree-shake) |
 | Key decisions | Phase 0 GATE: PASS (continue); Phase 1 navigation timeout: accepted as app-side issue (user-confirmed); p95 verdict: ITERATE band |
 | Architecture B verdict | Structurally valid; performance requires one targeted fix before ship |

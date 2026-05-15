@@ -56,10 +56,17 @@ abstract class AiTestHost {
 ///
 /// ```dart
 /// WidgetsFlutterBinding.ensureInitialized();
-/// AiTestBinding.ensureInitialized();   // gate-guarded; no args needed
+/// // Compile-time guard so dart2js tree-shakes Projection + transitive
+/// // imports out of the release bundle.
+/// if (!kReleaseMode) {
+///   AiTestBinding.ensureInitialized(host: Projection());
+/// }
 /// MagicRouter.instance.addObserver(…);
 /// await Magic.init(…);
 /// ```
+///
+/// The `host:` argument is required to install the projection — passing
+/// `null` (or omitting it) runs the gate but emits no mirror DOM.
 class AiTestBinding {
   AiTestBinding._();
 
