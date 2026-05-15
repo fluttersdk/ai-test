@@ -6,6 +6,7 @@ import 'binding.dart';
 import 'dom_emitter.dart';
 import 'glasspane_mount.dart';
 import 'metrics.dart';
+import 'mirror_node.dart';
 import 'projection_stability_stub.dart'
     if (dart.library.js_interop) 'projection_stability_web.dart';
 import 'role_resolver.dart';
@@ -36,6 +37,17 @@ import 'testid_synthesizer.dart';
 ///    [RenderObject.applyPaintTransform] during the RenderObject walk, NEVER
 ///    calling [RenderObject.localToGlobal] per leaf (which would cost
 ///    O(N x depth) for an N-leaf tree).
+///
+/// **V1 diff updates (this revision).** The projection now maintains a
+/// per-RenderBox [MirrorNode] index. Each emit walks the render tree, but:
+/// - new RenderBoxes create a fresh DOM node (`upsertMirror(existing: null)`),
+/// - already-indexed RenderBoxes reuse their DOM node and only mutate
+///   attributes when [MirrorNode.needsUpdate] returns true,
+/// - subtrees with no entries in `_repaintedThisFrame` (and no dirty
+///   descendant) skip the Matrix4 walk entirely (the dominant V1 saving on
+///   static screens),
+/// - RenderBoxes present in the prior index but NOT visited in the current
+///   emit are removed via `removeMirror`.
 ///
 /// **Cross-platform compile.** All `package:web` interop is encapsulated in
 /// [DomEmitter] / [GlasspaneMount] (conditional-import pattern), so this file
@@ -99,11 +111,24 @@ class Projection implements AiTestHost {
 
   /// Accumulates every [RenderObject] that was painted in the current frame.
   ///
-  /// Populated by the per-frame repaint hook wired in [activate]. Step 6 reads
-  /// this set to diff-update only the nodes that actually repainted, then
-  /// clears it after each emit. The set is never cleared in this step; Step 6
-  /// owns that lifecycle.
+  /// Populated by the per-frame repaint hook wired in [activate]. The diff
+  /// loop in [_emit] reads this set to skip clean subtrees, then clears it
+  /// at the end of every emit.
   final Set<RenderObject> _repaintedThisFrame = <RenderObject>{};
+
+  // -------------------------------------------------------------------------
+  // V1 diff index — keyed by RenderObject identity
+  // -------------------------------------------------------------------------
+
+  /// Per-RenderObject diff state. Survives across emits; mutated in place by
+  /// the diff loop (create on first sight, refresh on update, drop on orphan).
+  ///
+  /// Keying by [RenderObject] (not [Element]) matches the V0 emission site:
+  /// mirror DOM nodes are created inside [_walkRenderObject] where only the
+  /// RenderBox is in scope. RenderObject identity is stable as long as the
+  /// owning Element retains the same `runtimeType` + `key`; orphan handling
+  /// (delete-then-create) covers the type/key change case.
+  final Map<RenderObject, MirrorNode> _index = <RenderObject, MirrorNode>{};
 
   Projection({
     GlasspaneMount? glassPane,
@@ -140,9 +165,6 @@ class Projection implements AiTestHost {
 
   /// Exposes [_repaintedThisFrame] for chrome-platform tests that assert the
   /// repaint-set accumulator works as expected.
-  ///
-  /// Do NOT read this from production code. Step 6 will consume and clear the
-  /// set as part of the diff-update loop.
   @visibleForTesting
   Set<RenderObject> get debugRepaintedThisFrameForTesting =>
       _repaintedThisFrame;
@@ -159,6 +181,9 @@ class Projection implements AiTestHost {
 
   void _emit(Duration _) {
     _scheduled = false;
+    // FlutterTimeline gives DevTools a span for V1 debugging; no-op when the
+    // timeline is not collecting (kProfileMode || kDebugMode + tracing on).
+    FlutterTimeline.startSync('ai_test:emit');
     final stopwatch = Stopwatch()..start();
 
     final rootElement = WidgetsBinding.instance.rootElement;
@@ -166,14 +191,12 @@ class Projection implements AiTestHost {
       // No tree mounted yet (e.g. very first frame in a test). Reschedule so
       // the next paint produces mirrors.
       _scheduleEmit();
+      FlutterTimeline.finishSync();
       return;
     }
 
-    // 1. Resolve and clear the mirror host. textContent='' is the cheapest
-    //    cross-browser child-eviction path and avoids the `replaceChildren`
-    //    JS-variadic interop ceremony.
+    // 1. Resolve the host (do NOT clear it — V1 mutates per-node, not per-frame).
     final host = _glassPane.ensureHost();
-    _emitter.clearHost(host);
 
     // 2. Walk the Element tree to collect a Widget/Key/text/form-field map
     //    keyed by RenderObject. This is the only path that gives access to
@@ -183,19 +206,50 @@ class Projection implements AiTestHost {
 
     // 3. Walk the RenderObject tree, accumulating Matrix4 transforms so
     //    every box's global rect is computed in O(1) per box rather than
-    //    O(depth) via per-leaf localToGlobal.
+    //    O(depth) via per-leaf localToGlobal. Visited tracks which indexed
+    //    RenderObjects survived this frame (anything left in _index but not
+    //    visited is an orphan to remove).
     final newRects = <RenderBox, Rect>{};
+    final visited = <RenderObject>{};
     for (final view in RendererBinding.instance.renderViews) {
-      _walkRenderObject(view, Matrix4.identity(), elementInfo, host, newRects);
+      _walkRenderObject(
+        view,
+        Matrix4.identity(),
+        elementInfo,
+        host,
+        newRects,
+        visited,
+      );
     }
 
-    // 4. Update stability tracking and publish the boolean to JS so the
+    // 4. Orphan cleanup: drop every entry in the index that the walk did not
+    //    visit this frame. This handles widget unmounts AND the rare case
+    //    where a parent re-creates a child with a new key (the old Element /
+    //    RenderObject pair vanishes, the new one mounts with a different
+    //    identity).
+    if (_index.length != visited.length) {
+      final orphans = <RenderObject>[];
+      for (final key in _index.keys) {
+        if (!visited.contains(key)) orphans.add(key);
+      }
+      for (final key in orphans) {
+        final node = _index.remove(key);
+        if (node != null) {
+          _emitter.removeMirror(node);
+        }
+      }
+    }
+
+    // 5. Drain the per-frame repaint set so the next emit starts fresh.
+    _repaintedThisFrame.clear();
+
+    // 6. Update stability tracking and publish the boolean to JS so the
     //    Playwright `waitForFunction(() => window.__aiTestStable)` gate can
     //    proceed. Threshold is >= 1 (single stable frame) because Flutter
     //    only schedules post-frame callbacks when it has rendering work to
     //    do — a static page yields very few samples and a higher threshold
-    //    would deadlock the test. The first emit sets stable=true; any
-    //    subsequent emit with changed rects flips it back to false.
+    //    would deadlock the test. Step 7 may tighten this back to >= 2 once
+    //    diff updates produce post-frame callbacks reliably enough.
     if (_rectsEqual(_previousRects, newRects)) {
       _consecutiveStableFrames++;
     } else {
@@ -204,14 +258,16 @@ class Projection implements AiTestHost {
     _previousRects = newRects;
     _publishStability(_consecutiveStableFrames >= 1 || newRects.isNotEmpty);
 
-    // 5. Record the per-frame cost; the metrics class itself decides whether
-    //    to publish to the JS global based on its publishToJs flag.
+    // 7. Record the per-frame cost; the metrics class itself decides whether
+    //    to publish to the JS global based on its publishToJs flag and the
+    //    snapshot-cadence configuration (Step 2: every 30 frames by default).
     stopwatch.stop();
     _metrics.record(stopwatch.elapsedMicroseconds);
     _metrics.snapshot();
 
-    // 6. Re-arm the next frame. Post-frame callbacks are ONE-SHOT.
+    // 8. Re-arm the next frame. Post-frame callbacks are ONE-SHOT.
     _scheduleEmit();
+    FlutterTimeline.finishSync();
   }
 
   // -------------------------------------------------------------------------
@@ -397,8 +453,9 @@ class Projection implements AiTestHost {
   }
 
   // -------------------------------------------------------------------------
-  // RenderObject walk — accumulates Matrix4 and emits mirrors for boxes that
-  // (a) have an Element entry, and (b) project to a finite on-screen rect.
+  // RenderObject walk — accumulates Matrix4 and emits/diffs mirrors for boxes
+  // that (a) have an Element entry, and (b) project to a finite on-screen
+  // rect. The repaint-set short-circuit (V1) skips entire clean subtrees.
   // -------------------------------------------------------------------------
 
   void _walkRenderObject(
@@ -407,14 +464,30 @@ class Projection implements AiTestHost {
     Map<RenderObject, _ElementInfo> elementInfo,
     Object host,
     Map<RenderBox, Rect> rectsOut,
+    Set<RenderObject> visited,
   ) {
+    // V1 clean-subtree short-circuit. When this RenderObject is already
+    // indexed AND neither it NOR any descendant repainted this frame, every
+    // mirror under it is up-to-date — reuse the cached rect, mark every
+    // indexed descendant visited, and skip the Matrix4 walk entirely.
+    if (node is RenderBox &&
+        node.hasSize &&
+        elementInfo[node] != null &&
+        _index.containsKey(node) &&
+        !_repaintedThisFrame.contains(node) &&
+        !_subtreeHasRepaint(node)) {
+      _markSubtreeVisited(node, visited, rectsOut);
+      return;
+    }
+
     if (node is RenderBox && node.hasSize) {
       final info = elementInfo[node];
       if (info != null) {
         final rect = _toGlobalRect(node, ancestorTransform);
         if (rect != null && _isFinite(rect)) {
           rectsOut[node] = rect;
-          _appendMirror(host, info, rect);
+          _diffEmit(host, node, info, rect);
+          visited.add(node);
         }
       }
     }
@@ -425,8 +498,61 @@ class Projection implements AiTestHost {
       // siblings start from the same ancestor matrix.
       final childTransform = ancestorTransform.clone();
       node.applyPaintTransform(child, childTransform);
-      _walkRenderObject(child, childTransform, elementInfo, host, rectsOut);
+      _walkRenderObject(
+        child,
+        childTransform,
+        elementInfo,
+        host,
+        rectsOut,
+        visited,
+      );
     });
+  }
+
+  /// Recursive descendant scan. Returns `true` as soon as any RenderObject in
+  /// the subtree rooted at [root] (excluding [root] itself) is in
+  /// [_repaintedThisFrame]. Bounds are conservative: any hit short-circuits.
+  bool _subtreeHasRepaint(RenderObject root) {
+    bool dirty = false;
+    void visit(RenderObject n) {
+      if (dirty) return;
+      n.visitChildren((child) {
+        if (dirty) return;
+        if (_repaintedThisFrame.contains(child)) {
+          dirty = true;
+          return;
+        }
+        visit(child);
+      });
+    }
+
+    visit(root);
+    return dirty;
+  }
+
+  /// Marks every indexed RenderObject in the subtree rooted at [root] as
+  /// visited, refreshing [rectsOut] from the cached [MirrorNode.lastRect] so
+  /// the stability comparison still sees the full per-RenderBox rect map.
+  ///
+  /// Skips the Matrix4 walk entirely — that's the V1 perf win on static
+  /// subtrees.
+  void _markSubtreeVisited(
+    RenderObject root,
+    Set<RenderObject> visited,
+    Map<RenderBox, Rect> rectsOut,
+  ) {
+    void visit(RenderObject n) {
+      final indexed = _index[n];
+      if (indexed != null) {
+        visited.add(n);
+        if (n is RenderBox) {
+          rectsOut[n] = indexed.lastRect;
+        }
+      }
+      n.visitChildren(visit);
+    }
+
+    visit(root);
   }
 
   Rect? _toGlobalRect(RenderBox box, Matrix4 transform) {
@@ -453,10 +579,16 @@ class Projection implements AiTestHost {
   }
 
   // -------------------------------------------------------------------------
-  // DOM emit
+  // V1 diff emit — create on first sight, mutate-in-place on subsequent
+  // emits, no DOM mutation when MirrorNode.needsUpdate returns false.
   // -------------------------------------------------------------------------
 
-  void _appendMirror(Object host, _ElementInfo info, Rect rect) {
+  void _diffEmit(
+    Object host,
+    RenderBox node,
+    _ElementInfo info,
+    Rect rect,
+  ) {
     final testid = _synthesizer.synthesize(
       info.element,
       widgetTypeName: info.typeName,
@@ -465,20 +597,51 @@ class Projection implements AiTestHost {
       key: info.key,
     );
     final role = _roleResolver.resolve(info.typeName);
-    final styleCss = 'position:absolute; '
-        'left:${rect.left}px; '
-        'top:${rect.top}px; '
-        'width:${rect.width}px; '
-        'height:${rect.height}px; '
-        'pointer-events:none;';
+    final text = info.extractedText;
 
-    _emitter.appendMirror(
-      host,
-      testid: testid,
-      role: role,
-      text: info.extractedText,
-      styleCss: styleCss,
-    );
+    final existing = _index[node];
+    if (existing == null) {
+      // First sight of this RenderObject: create mirror DOM + index entry.
+      final hostRef = _emitter.upsertMirror(
+        existing: null,
+        host: host,
+        rect: rect,
+        testid: testid,
+        role: role,
+        text: text,
+      );
+      _index[node] = MirrorNode(
+        hostElement: hostRef,
+        lastRect: rect,
+        lastTestid: testid,
+        lastRole: role,
+        lastText: text,
+      );
+      return;
+    }
+
+    // Already indexed: only touch the DOM when something changed.
+    if (existing.needsUpdate(
+      newRect: rect,
+      newTestid: testid,
+      newRole: role,
+      newText: text,
+    )) {
+      _emitter.upsertMirror(
+        existing: existing,
+        host: host,
+        rect: rect,
+        testid: testid,
+        role: role,
+        text: text,
+      );
+      existing.recordCommitted(
+        rect: rect,
+        testid: testid,
+        role: role,
+        text: text,
+      );
+    }
   }
 
   // -------------------------------------------------------------------------

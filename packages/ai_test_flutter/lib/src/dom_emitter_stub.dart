@@ -1,4 +1,7 @@
+import 'package:flutter/rendering.dart';
+
 import 'dom_emitter.dart';
+import 'mirror_node.dart';
 
 /// Non-web no-op implementation of [DomEmitter].
 ///
@@ -6,18 +9,19 @@ import 'dom_emitter.dart';
 /// the VM compile target resolves.
 class _StubDomEmitter implements DomEmitter {
   @override
-  void clearHost(Object host) {
+  Object upsertMirror({
+    required MirrorNode? existing,
+    required Object host,
+    required Rect rect,
+    required String testid,
+    String? role,
+    String? text,
+  }) {
     throw UnsupportedError('DomEmitter is web-only.');
   }
 
   @override
-  void appendMirror(
-    Object host, {
-    required String testid,
-    required String role,
-    String? text,
-    required String styleCss,
-  }) {
+  void removeMirror(MirrorNode node) {
     throw UnsupportedError('DomEmitter is web-only.');
   }
 }

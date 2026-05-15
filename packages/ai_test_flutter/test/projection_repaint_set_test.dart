@@ -53,8 +53,13 @@ void main() {
 
         final projection = Projection();
 
-        // 1. Activate the projection — this wires debugOnProfilePaint.
-        projection.activate();
+        // 1. Wire debugOnProfilePaint manually (not via activate(), which
+        //    would also schedule a post-frame _emit; that emit drains the
+        //    repaint set after every frame as part of the V1 diff loop, so
+        //    the test would observe an empty set).
+        debugOnProfilePaint = (RenderObject ro) {
+          projection.debugRepaintedThisFrameForTesting.add(ro);
+        };
 
         // 2. Trigger a setState on the child; pump one frame so Flutter
         //    paints and debugOnProfilePaint fires for every repainted node.

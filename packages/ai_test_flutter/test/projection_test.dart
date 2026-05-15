@@ -3,16 +3,30 @@ library;
 
 import 'package:ai_test_flutter/ai_test_flutter.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:web/web.dart' as web;
 
 import 'helpers/projection_dom_probe.dart';
 
 void main() {
-  // Each test owns the host DOM, so wipe the previous projection and any
-  // leftover host element before pumping the next widget tree.
+  // Each test owns the host DOM. V0's createGlasspaneMount() always appends
+  // a fresh host div on each ensureHost() call; orphan hosts from prior
+  // tests stay in the shadow root and confuse `querySelector('#ai-test-host')`.
+  // Manually purge any stale hosts so each test starts with a clean slate.
+  // Also clear debugOnProfilePaint so a prior test's wiring does not leak.
   setUp(() {
-    final mount = createGlasspaneMount();
-    mount.clearHost();
+    debugOnProfilePaint = null;
+    final shadow = web.document.querySelector('flt-glass-pane')?.shadowRoot;
+    if (shadow != null) {
+      final stale = shadow.querySelectorAll('#ai-test-host');
+      for (var i = 0; i < stale.length; i++) {
+        final node = stale.item(i);
+        if (node != null) {
+          node.parentNode?.removeChild(node);
+        }
+      }
+    }
   });
 
   testWidgets('Projection emits a mirror div for a Text widget', (
@@ -50,38 +64,49 @@ void main() {
     }
   });
 
-  testWidgets('Projection clears the host between successive emits', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(400, 200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.resetPhysicalSize);
+  testWidgets(
+    'Projection updates mirror text in place across successive emits',
+    (tester) async {
+      tester.view.physicalSize = const Size(400, 200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
 
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(body: Center(child: Text('First'))),
-      ),
-    );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: Center(child: Text('First'))),
+        ),
+      );
 
-    final projection = Projection();
-    projection.runEmitForTesting();
+      final projection = Projection();
+      // V1 diff-update path requires the per-frame repaint hook so the
+      // second emit recognises the changed Text and bypasses the
+      // clean-subtree short-circuit.
+      projection.activate();
+      projection.runEmitForTesting();
 
-    final firstPass = collectProjectionMirrors();
-    expect(firstPass.where((m) => m.text == 'First'), isNotEmpty);
+      final firstPass = collectProjectionMirrors();
+      expect(firstPass.where((m) => m.text == 'First'), isNotEmpty);
 
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(body: Center(child: Text('Second'))),
-      ),
-    );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: Center(child: Text('Second'))),
+        ),
+      );
 
-    projection.runEmitForTesting();
+      // The post-frame _emit re-armed by the prior emit consumes the
+      // repaint set populated during pumpWidget; that callback updates
+      // mirrors in-place via the diff path. The explicit second
+      // runEmitForTesting() below is a defensive no-op (set already drained).
+      projection.runEmitForTesting();
 
-    final secondPass = collectProjectionMirrors();
-    // The previous frame's "First" mirror MUST be gone (V0 = full re-emit).
-    expect(secondPass.where((m) => m.text == 'First'), isEmpty);
-    expect(secondPass.where((m) => m.text == 'Second'), isNotEmpty);
-  });
+      final secondPass = collectProjectionMirrors();
+      expect(secondPass.where((m) => m.text == 'First'), isEmpty);
+      expect(secondPass.where((m) => m.text == 'Second'), isNotEmpty);
+
+      // Restore the debug global so flutter_test's invariant check passes.
+      debugOnProfilePaint = null;
+    },
+  );
 
   testWidgets('Projection records a metrics sample per emit', (tester) async {
     tester.view.physicalSize = const Size(400, 200);

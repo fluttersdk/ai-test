@@ -10,22 +10,44 @@
 /// receives a stub whose methods throw [UnsupportedError].
 library;
 
+import 'package:flutter/rendering.dart';
+
+import 'mirror_node.dart';
+
 export 'dom_emitter_stub.dart'
     if (dart.library.js_interop) 'dom_emitter_web.dart';
 
 abstract interface class DomEmitter {
-  /// Removes every child of [host] in preparation for the next emit.
-  void clearHost(Object host);
-
-  /// Appends one mirror `<div>` to [host] with the supplied attributes.
+  /// Creates a new mirror DOM node OR mutates an existing one in place.
   ///
-  /// [styleCss] must be a complete inline `style` value (no key=value
-  /// parsing happens here).
-  void appendMirror(
-    Object host, {
+  /// When [existing] is `null`, the implementation creates a new `<div>` host
+  /// inside [host], sets the `data-testid` / `data-role` / `data-text`
+  /// attributes plus inline `style` from [rect], and returns the newly
+  /// created element reference (typed [Object] for cross-platform compile).
+  ///
+  /// When [existing] is non-null, the implementation reads the cached host
+  /// element from [MirrorNode.hostElement], mutates `style.left/top/width/
+  /// height` and `data-*` attributes in place, and returns the same element
+  /// reference. No new DOM node is created — this is the V1 diff path that
+  /// avoids the per-frame full re-emit cost.
+  ///
+  /// Callers must wrap the returned reference into a fresh [MirrorNode] (when
+  /// [existing] was null) or call [MirrorNode.recordCommitted] (when [existing]
+  /// was non-null) to refresh the diff baseline before the next emit.
+  Object upsertMirror({
+    required MirrorNode? existing,
+    required Object host,
+    required Rect rect,
     required String testid,
-    required String role,
+    String? role,
     String? text,
-    required String styleCss,
   });
+
+  /// Removes the mirror DOM node held by [node] from its parent host.
+  ///
+  /// Called by [Projection._emit] for every entry in the diff index whose
+  /// keying RenderObject was not visited during the current emit (orphan
+  /// detection). After the call, the caller must drop its [MirrorNode]
+  /// reference from the diff index.
+  void removeMirror(MirrorNode node);
 }
