@@ -61,4 +61,19 @@ void main() {
       expect(host.activationCount, equals(1));
     },
   );
+
+  test(
+    'ensureInitialized is no-op when kDebugMode is false (profile)',
+    () {
+      final host = _SpyHost();
+
+      AiTestBinding.ensureInitialized(
+        overrideDebugMode: false,
+        overrideDartDefineValue: '1',
+        host: host,
+      );
+
+      expect(host.activationCount, equals(0));
+    },
+  );
 }

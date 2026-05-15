@@ -7,8 +7,8 @@ import 'package:flutter/foundation.dart';
 /// Contract for the object that activates AI-test support at runtime.
 ///
 /// [AiTestBinding.ensureInitialized] delegates to [activate] when the
-/// debug-mode + dart-define + URL-query gate passes. The canonical
-/// implementation is [AiTestPluginV2]; tests supply a spy via this interface.
+/// debug-mode + dart-define + URL-query gate passes. Implementations
+/// activate the projection; tests supply a spy via this interface.
 abstract class AiTestHost {
   /// Called exactly once after the gate passes.
   ///
@@ -26,12 +26,11 @@ abstract class AiTestHost {
 /// ## Activation gate
 ///
 /// Activation requires ALL of:
-/// 1. `kReleaseMode == false` — i.e. debug OR profile build. Release builds
-///    are always a no-op; the binding tree-shakes cleanly under
-///    `flutter build web --release`. Profile is included so per-frame
-///    measurement reflects realistic dart2js-optimized cost (debug-mode
-///    measurements are 2-5x inflated and useless for the spike's <3ms p95
-///    acceptance threshold).
+/// 1. `kDebugMode == true` — debug build only. V3 narrows from
+///    `debug OR profile` to `debug-only` per Stage 3 D1 because text-typing
+///    controller-mutation path requires debug binding (Flutter #87990).
+///    Release builds are always a no-op; the binding tree-shakes cleanly under
+///    `flutter build web --release`.
 /// 2. At least one of the flag signals is `"1"`:
 ///    - The compile-time dart-define `AI_TEST` (set via
 ///      `--dart-define=AI_TEST=1`).
@@ -56,10 +55,10 @@ abstract class AiTestHost {
 ///
 /// ```dart
 /// WidgetsFlutterBinding.ensureInitialized();
-/// // Compile-time guard so dart2js tree-shakes AiTestPluginV2 + transitive
+/// // Compile-time guard so dart2js tree-shakes the binding + transitive
 /// // imports out of the release bundle.
-/// if (!kReleaseMode) {
-///   AiTestBinding.ensureInitialized(host: AiTestPluginV2());
+/// if (kIsWeb && kDebugMode) {
+///   AiTestBinding.ensureInitialized(host: myAiTestHost);
 /// }
 /// MagicRouter.instance.addObserver(…);
 /// await Magic.init(…);
@@ -104,11 +103,11 @@ class AiTestBinding {
   }) {
     if (_activated) return;
 
-    // 1. Resolve the non-release flag (debug OR profile, NOT release).
-    //    Profile builds set kReleaseMode=false; spike measurement targets
-    //    profile so this gate must accept it. Release tree-shakes the
-    //    binding entirely.
-    final bool isDebug = overrideDebugMode ?? !kReleaseMode;
+    // 1. Resolve the debug-mode flag (debug-only, NOT profile or release).
+    //    V3 narrows to kDebugMode because text-typing controller-mutation
+    //    path requires debug binding (Flutter #87990). Release tree-shakes
+    //    the binding entirely.
+    final bool isDebug = overrideDebugMode ?? kDebugMode;
 
     // 2. Resolve the dart-define signal.
     //    The literal 'AI_TEST' is intentionally hardcoded — see class docblock.
