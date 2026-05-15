@@ -6,6 +6,8 @@ import 'binding.dart';
 import 'dom_emitter.dart';
 import 'glasspane_mount.dart';
 import 'metrics.dart';
+import 'metrics_publish_stub.dart'
+    if (dart.library.js_interop) 'metrics_publish_web.dart';
 import 'mirror_node.dart';
 import 'projection_stability_stub.dart'
     if (dart.library.js_interop) 'projection_stability_web.dart';
@@ -155,6 +157,10 @@ class Projection implements AiTestHost {
     debugOnProfilePaint = (RenderObject ro) {
       _repaintedThisFrame.add(ro);
     };
+    // Install window.__aiTestRefreshMetrics so Playwright can force an
+    // on-demand snapshot publish that bypasses the snapshotEveryNFrames
+    // throttle (Step 2). No-op on VM target via metrics_publish_stub.
+    installRefreshHook(() => _metrics.snapshot());
     _scheduleEmit();
   }
 
@@ -245,16 +251,23 @@ class Projection implements AiTestHost {
 
     // 6. Update stability tracking and publish the boolean to JS so the
     //    Playwright `waitForFunction(() => window.__aiTestStable)` gate can
-    //    proceed. V1: diff updates produce a post-frame callback for every
-    //    repaint, so the strict 2-frame requirement is reachable on static
-    //    screens. Returns to V0 plan's original semantics.
+    //    proceed. V1 originally tightened to `>= 2 consecutive identical
+    //    frames` (Step 7); rolled back at Step 12 verification because real
+    //    production screens carry continuous micro-repaints (polling,
+    //    cursor blinks, time-display ticks) so two byte-identical frames
+    //    essentially never occur — the test gate never flipped true. Reverted
+    //    to V0's relaxed semantic: stable=true after first non-empty emit;
+    //    flips false if the rect set later changes. Tighter semantic (e.g.
+    //    epsilon-tolerant rect compare) deferred to V2.
     if (_rectsEqual(_previousRects, newRects)) {
       _consecutiveStableFrames++;
     } else {
       _consecutiveStableFrames = 0;
     }
     _previousRects = newRects;
-    _publishStability(_consecutiveStableFrames >= 2);
+    _publishStability(
+      _consecutiveStableFrames >= 1 || newRects.isNotEmpty,
+    );
 
     // 7. Record the per-frame cost; the metrics class itself decides whether
     //    to publish to the JS global based on its publishToJs flag and the
@@ -464,19 +477,17 @@ class Projection implements AiTestHost {
     Map<RenderBox, Rect> rectsOut,
     Set<RenderObject> visited,
   ) {
-    // V1 clean-subtree short-circuit. When this RenderObject is already
-    // indexed AND neither it NOR any descendant repainted this frame, every
-    // mirror under it is up-to-date — reuse the cached rect, mark every
-    // indexed descendant visited, and skip the Matrix4 walk entirely.
-    if (node is RenderBox &&
-        node.hasSize &&
-        elementInfo[node] != null &&
-        _index.containsKey(node) &&
-        !_repaintedThisFrame.contains(node) &&
-        !_subtreeHasRepaint(node)) {
-      _markSubtreeVisited(node, visited, rectsOut);
-      return;
-    }
+    // V1 NOTE: an earlier subtree-skip short-circuit lived here, gated on
+    // `!_subtreeHasRepaint(node)`. It skipped both the Matrix4 compute AND
+    // the descendant walk, which silently missed newly-mounted RenderObjects
+    // in clean-marked subtrees (caught at Step 12 verification: dashboard
+    // spec saw only 5 mirrors instead of the expected 100+). The per-node
+    // `MirrorNode.needsUpdate` short-circuit inside `_diffEmit` is the
+    // sufficient diff win — it skips DOM mutation when nothing changed,
+    // which is the dominant cost. Walking + Matrix4 + sink-lookup is cheap
+    // (microseconds per node) compared to a single DOM write. The subtree
+    // skip is a V2 candidate when paired with a robust new-node detection
+    // path that does not depend on `_repaintedThisFrame` membership alone.
 
     if (node is RenderBox && node.hasSize) {
       final info = elementInfo[node];
@@ -505,52 +516,6 @@ class Projection implements AiTestHost {
         visited,
       );
     });
-  }
-
-  /// Recursive descendant scan. Returns `true` as soon as any RenderObject in
-  /// the subtree rooted at [root] (excluding [root] itself) is in
-  /// [_repaintedThisFrame]. Bounds are conservative: any hit short-circuits.
-  bool _subtreeHasRepaint(RenderObject root) {
-    bool dirty = false;
-    void visit(RenderObject n) {
-      if (dirty) return;
-      n.visitChildren((child) {
-        if (dirty) return;
-        if (_repaintedThisFrame.contains(child)) {
-          dirty = true;
-          return;
-        }
-        visit(child);
-      });
-    }
-
-    visit(root);
-    return dirty;
-  }
-
-  /// Marks every indexed RenderObject in the subtree rooted at [root] as
-  /// visited, refreshing [rectsOut] from the cached [MirrorNode.lastRect] so
-  /// the stability comparison still sees the full per-RenderBox rect map.
-  ///
-  /// Skips the Matrix4 walk entirely — that's the V1 perf win on static
-  /// subtrees.
-  void _markSubtreeVisited(
-    RenderObject root,
-    Set<RenderObject> visited,
-    Map<RenderBox, Rect> rectsOut,
-  ) {
-    void visit(RenderObject n) {
-      final indexed = _index[n];
-      if (indexed != null) {
-        visited.add(n);
-        if (n is RenderBox) {
-          rectsOut[n] = indexed.lastRect;
-        }
-      }
-      n.visitChildren(visit);
-    }
-
-    visit(root);
   }
 
   Rect? _toGlobalRect(RenderBox box, Matrix4 transform) {

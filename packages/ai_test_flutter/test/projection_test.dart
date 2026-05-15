@@ -112,7 +112,7 @@ void main() {
   );
 
   testWidgets(
-    'stability requires >= 2 consecutive identical frames',
+    'stability flips true on first non-empty emit (V0 relaxed semantic)',
     (tester) async {
       tester.view.physicalSize = const Size(400, 200);
       tester.view.devicePixelRatio = 1.0;
@@ -125,34 +125,24 @@ void main() {
       );
 
       final projection = Projection();
-      // Emit 1: _previousRects starts empty; newRects is non-empty.
-      // _rectsEqual returns false (length mismatch) → counter resets to 0.
-      // _publishStability(false): 0 >= 2 is false.
-      projection.runEmitForTesting();
-      expect(
-        globalContext['__aiTestStable']?.dartify(),
-        isFalse,
-        reason: 'after emit 1: rects differ from empty baseline, counter = 0',
-      );
-
-      // Emit 2: _previousRects == newRects → counter increments to 1.
-      // _publishStability(false): 1 >= 2 is still false.
-      projection.runEmitForTesting();
-      expect(
-        globalContext['__aiTestStable']?.dartify(),
-        isFalse,
-        reason:
-            'after emit 2: counter = 1, which is still below the >= 2 threshold',
-      );
-
-      // Emit 3: same rects again → counter increments to 2.
-      // _publishStability(true): 2 >= 2 satisfies the strict threshold.
+      // V0 relaxed semantic, restored at V1 Step 12: stable=true on the
+      // first non-empty emit, even when consecutiveStableFrames is 0. Strict
+      // >=2 was unreachable on real production screens (continuous
+      // micro-repaints from polling, cursor blinks, time-display ticks).
       projection.runEmitForTesting();
       expect(
         globalContext['__aiTestStable']?.dartify(),
         isTrue,
         reason:
-            'after emit 3: counter = 2, satisfying the strict >= 2 threshold',
+            'after emit 1: newRects.isNotEmpty => stable, even though counter = 0',
+      );
+
+      // Emit 2: identical rects → counter increments; still stable.
+      projection.runEmitForTesting();
+      expect(
+        globalContext['__aiTestStable']?.dartify(),
+        isTrue,
+        reason: 'after emit 2: rects unchanged, still stable',
       );
     },
   );
