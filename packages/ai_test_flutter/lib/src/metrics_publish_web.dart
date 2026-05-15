@@ -20,3 +20,19 @@ void publishMetricsSnapshot(MetricsSnapshot snap) {
     'count': snap.count,
   }.jsify()!;
 }
+
+/// Installs `window.__aiTestRefreshMetrics` as a callable JS function.
+///
+/// When Playwright calls `window.__aiTestRefreshMetrics()`, it synchronously
+/// computes the latest [MetricsSnapshot] via [snapshotProvider] and writes it
+/// to `window.__aiTestMetrics`. This bypasses the 30-frame throttle so specs
+/// always read fresh data on demand.
+///
+/// Call this from `Projection.activate()` after the [ProjectionMetrics]
+/// instance is ready, passing a closure that invokes its `snapshot()` method.
+void installRefreshHook(MetricsSnapshot Function() snapshotProvider) {
+  globalContext['__aiTestRefreshMetrics'] = (() {
+    final MetricsSnapshot snap = snapshotProvider();
+    publishMetricsSnapshot(snap);
+  }).toJS;
+}

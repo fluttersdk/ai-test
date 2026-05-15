@@ -77,5 +77,75 @@ void main() {
       expect(single.p95, equals(42));
       expect(single.p99, equals(42));
     });
+
+    test('record() with maxSamples=3 evicts FIFO via ListQueue', () {
+      final metrics = ProjectionMetrics(publishToJs: false, maxSamples: 3);
+
+      // Record 4 samples into a ring buffer of capacity 3.
+      // After the 4th record the first sample (10) must be evicted.
+      metrics.record(10);
+      metrics.record(20);
+      metrics.record(30);
+      metrics.record(40);
+
+      final snap = metrics.snapshot();
+
+      // Only 3 samples are retained.
+      expect(snap.count, equals(3));
+
+      // The retained samples are [20, 30, 40]; avg = 30.0.
+      // If FIFO eviction is wrong (e.g. last element removed instead of first),
+      // the avg would be (10 + 20 + 30) / 3 = 20.0.
+      expect(snap.avg, closeTo(30.0, 0.001));
+    });
+
+    test('snapshot() publishes to JS only every Nth frame (default 30)', () {
+      // Fake publish function captures every call so we can assert the cadence
+      // without touching any real JS global.
+      final List<MetricsSnapshot> published = <MetricsSnapshot>[];
+      void fakePublish(MetricsSnapshot snap) => published.add(snap);
+
+      final metrics = ProjectionMetrics(
+        publishToJs: true,
+        publishFnForTesting: fakePublish,
+      );
+
+      // Record a baseline sample so snapshots are non-empty.
+      metrics.record(100);
+
+      // Frames 1..29 — counter advances but threshold (30) not yet reached.
+      for (var i = 1; i < 30; i++) {
+        metrics.snapshot();
+      }
+      expect(published, isEmpty, reason: 'no publish before frame 30');
+
+      // Frame 30 — threshold reached; publish must fire.
+      metrics.snapshot();
+      expect(published.length, equals(1), reason: 'publish fires on frame 30');
+
+      // Frames 31..59 — second window, counter resets, no publish yet.
+      for (var i = 31; i < 60; i++) {
+        metrics.snapshot();
+      }
+      expect(published.length, equals(1),
+          reason: 'no second publish before frame 60');
+
+      // Frame 60 — second threshold; publish fires again.
+      metrics.snapshot();
+      expect(published.length, equals(2), reason: 'publish fires on frame 60');
+
+      // Frames 61..89.
+      for (var i = 61; i < 90; i++) {
+        metrics.snapshot();
+      }
+      expect(published.length, equals(2),
+          reason: 'no third publish before frame 90');
+
+      // Frame 90 — third threshold.
+      metrics.snapshot();
+      expect(published.length, equals(3), reason: 'publish fires on frame 90');
+
+      // Spot-check: frames 1, 5, 29 were NOT publish frames (tested via counts above).
+    });
   });
 }

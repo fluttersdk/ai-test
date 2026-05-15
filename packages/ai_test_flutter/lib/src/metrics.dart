@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:flutter/foundation.dart';
 
 import 'metrics_publish_stub.dart'
@@ -50,10 +52,12 @@ class MetricsSnapshot {
 /// ## JS exposure
 ///
 /// When [publishToJs] is `true` (the default) AND the app is running on web
-/// ([kIsWeb]), each [snapshot] call writes the result to
-/// `window.__aiTestMetrics` as a plain JS object with five numeric fields:
-/// `avg`, `p50`, `p95`, `p99`, `count`. The raw sample list is never
-/// exported — it could grow to megabyte scale at 60fps.
+/// ([kIsWeb]), [snapshot] writes to `window.__aiTestMetrics` only every
+/// [snapshotEveryNFrames] calls (default 30), throttling the JS marshal cost.
+/// The in-Dart return value is always the latest snapshot regardless of
+/// whether a JS publish fired. Playwright callers can invoke the
+/// `window.__aiTestRefreshMetrics()` JS function (installed via
+/// [installRefreshHook]) to force an immediate publish at any time.
 ///
 /// Pass `publishToJs: false` in unit tests so the VM target does not attempt
 /// a web-only JS write.
@@ -76,20 +80,42 @@ class ProjectionMetrics {
   /// Defaults to `600` (10 seconds at 60fps).
   final int maxSamples;
 
-  /// Whether to publish each snapshot to `window.__aiTestMetrics` on web.
+  /// Whether to publish snapshots to `window.__aiTestMetrics` on web.
   ///
   /// Set to `false` in unit tests to avoid VM-target JS write attempts.
   final bool publishToJs;
 
-  final List<int> _samples = [];
+  /// How many [snapshot] calls must occur before a JS publish fires.
+  ///
+  /// Defaults to `30` (roughly one publish per half-second at 60fps).
+  /// Pass a lower value (e.g. `1`) when immediate-publish behaviour is needed
+  /// for testing outside the standard test seam.
+  final int snapshotEveryNFrames;
+
+  /// Optional publish function injected in tests to observe cadence without
+  /// writing to a real JS global.
+  ///
+  /// When non-null, overrides the default [publishMetricsSnapshot] import.
+  /// Production callers never set this — it is intentionally not `@protected`
+  /// so unit tests in the same package can pass a fake closure.
+  final void Function(MetricsSnapshot)? publishFnForTesting;
+
+  final ListQueue<int> _samples = ListQueue<int>();
+
+  /// Frame counter that tracks how many [snapshot] calls have occurred since
+  /// the last JS publish.
+  int _framesSinceLastPublish = 0;
 
   /// Creates a [ProjectionMetrics] instance.
   ///
   /// [maxSamples] defaults to `600`. [publishToJs] defaults to `true`; pass
-  /// `false` in unit tests.
+  /// `false` in unit tests. [snapshotEveryNFrames] defaults to `30`.
+  /// [publishFnForTesting] is a test-only seam; omit in production.
   ProjectionMetrics({
     this.maxSamples = 600,
     this.publishToJs = true,
+    this.snapshotEveryNFrames = 30,
+    this.publishFnForTesting,
   });
 
   // -------------------------------------------------------------------------
@@ -102,7 +128,7 @@ class ProjectionMetrics {
   /// ring-buffer) before the new sample is appended.
   void record(int microseconds) {
     if (_samples.length >= maxSamples) {
-      _samples.removeAt(0);
+      _samples.removeFirst();
     }
     _samples.add(microseconds);
   }
@@ -112,9 +138,15 @@ class ProjectionMetrics {
   /// When [count] is `0` (no samples), all percentile fields are `0` and
   /// [avg] is `0.0` — guard on [count] before interpreting these values.
   ///
-  /// When [publishToJs] is `true` AND [kIsWeb] is `true`, also writes the
-  /// snapshot to `window.__aiTestMetrics`.
+  /// The in-Dart return value is always the latest snapshot. JS publish
+  /// (to `window.__aiTestMetrics`) is throttled: it fires only every
+  /// [snapshotEveryNFrames] calls. The [_framesSinceLastPublish] counter
+  /// advances on every call regardless — it is never skipped.
   MetricsSnapshot snapshot() {
+    // 1. Always advance the frame counter before any early return so the
+    //    cadence is never disrupted by empty-sample frames.
+    _framesSinceLastPublish++;
+
     final int n = _samples.length;
 
     if (n == 0) {
@@ -125,19 +157,17 @@ class ProjectionMetrics {
         p99: 0,
         count: 0,
       );
-      if (publishToJs && kIsWeb) {
-        publishMetricsSnapshot(empty);
-      }
+      _maybePublish(empty);
       return empty;
     }
 
-    // 1. Sort a copy so the original insertion order (ring-buffer) is preserved.
-    final List<int> sorted = List<int>.from(_samples)..sort();
+    // 2. Sort a copy so the original insertion order (ring-buffer) is preserved.
+    final List<int> sorted = _samples.toList(growable: false)..sort();
 
-    // 2. Compute the arithmetic mean.
+    // 3. Compute the arithmetic mean.
     final double avg = sorted.reduce((int a, int b) => a + b) / n;
 
-    // 3. Compute percentiles via nearest-rank: rank = ceil(N * pct / 100).
+    // 4. Compute percentiles via nearest-rank: rank = ceil(N * pct / 100).
     final int p50 = _percentile(sorted, n, 50);
     final int p95 = _percentile(sorted, n, 95);
     final int p99 = _percentile(sorted, n, 99);
@@ -150,10 +180,8 @@ class ProjectionMetrics {
       count: n,
     );
 
-    // 4. Push to JS global when running on web and opted in.
-    if (publishToJs && kIsWeb) {
-      publishMetricsSnapshot(snap);
-    }
+    // 5. Push to JS global at the configured cadence.
+    _maybePublish(snap);
 
     return snap;
   }
@@ -169,6 +197,29 @@ class ProjectionMetrics {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /// Publishes [snap] when the frame counter reaches [snapshotEveryNFrames].
+  ///
+  /// Routes through [publishFnForTesting] when set (test seam), otherwise
+  /// through the platform-appropriate [publishMetricsSnapshot] import.
+  /// Resets [_framesSinceLastPublish] to `0` after each publish.
+  void _maybePublish(MetricsSnapshot snap) {
+    if (!publishToJs) return;
+    if (_framesSinceLastPublish < snapshotEveryNFrames) return;
+
+    _framesSinceLastPublish = 0;
+
+    if (publishFnForTesting != null) {
+      publishFnForTesting!(snap);
+      return;
+    }
+
+    // Real JS publish; only reachable on web (kIsWeb guard kept for clarity
+    // even though the stub no-ops on non-web targets).
+    if (kIsWeb) {
+      publishMetricsSnapshot(snap);
+    }
+  }
 
   /// Nearest-rank percentile from a pre-sorted list.
   ///

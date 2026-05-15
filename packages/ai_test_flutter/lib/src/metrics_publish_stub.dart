@@ -8,3 +8,11 @@ import 'metrics.dart';
 void publishMetricsSnapshot(MetricsSnapshot snap) {
   // No-op: JS globals are unavailable on non-web targets.
 }
+
+/// No-op refresh-hook installer used on non-web targets.
+///
+/// On web this installs `window.__aiTestRefreshMetrics`; on VM/mobile/desktop
+/// there is no JS global surface so the call is silently ignored.
+void installRefreshHook(MetricsSnapshot Function() snapshotProvider) {
+  // No-op: JS globals are unavailable on non-web targets.
+}
