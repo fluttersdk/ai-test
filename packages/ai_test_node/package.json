@@ -1,0 +1,31 @@
+{
+  "name": "ai-test-mcp",
+  "version": "0.1.0",
+  "description": "MCP server bridging Claude / Cursor agents to Dart VM Service for live Flutter Web introspection.",
+  "type": "module",
+  "bin": {
+    "ai-test-mcp": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.20.1",
+    "zod": "^4.1.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.22.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  }
+}
