@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { VmServiceError } from '../vm_service_client.js';
 import type { ToolDefinition, ToolContext } from './index.js';
-import type { EvaluateResult, IsolateInfo, ToolResult } from '../types.js';
+import type { EvaluateResult, ToolResult } from '../types.js';
 
 const inputSchema = z.object({
     expression: z
@@ -12,36 +12,6 @@ const inputSchema = z.object({
 });
 
 type Input = z.infer<typeof inputSchema>;
-
-/**
- * Per-session cache of the resolved root library id for the current isolate.
- *
- * The Dart VM `evaluate` RPC needs a `targetId` (library, class, or instance)
- * whose scope hosts the imports the expression should resolve against. The
- * Flutter DevTools convention is to evaluate against the app's entry library,
- * `package:<app>/main.dart`, which transitively imports the controllers and
- * the Magic facade barrel. We resolve it once per isolate via `getIsolate` and
- * cache the result.
- *
- * Keyed by isolate id so a reconnect against a fresh isolate invalidates the
- * cache naturally.
- */
-const rootLibCache = new Map<string, string>();
-
-async function resolveRootLibId(ctx: ToolContext, isolateId: string): Promise<string> {
-    const cached = rootLibCache.get(isolateId);
-    if (cached) return cached;
-    const isolate = await ctx.call<IsolateInfo>('getIsolate', { isolateId });
-    const rootLibId = isolate.rootLib?.id;
-    if (!rootLibId) {
-        throw new McpError(
-            ErrorCode.InternalError,
-            'evaluate_dart: isolate response missing rootLib.id',
-        );
-    }
-    rootLibCache.set(isolateId, rootLibId);
-    return rootLibId;
-}
 
 /**
  * MCP tool: `evaluate_dart`.
@@ -71,7 +41,7 @@ export const evaluateDartTool: ToolDefinition<Input> = {
     handler: async (ctx: ToolContext, args: Input): Promise<ToolResult> => {
         try {
             const isolateId = await ctx.getIsolateId();
-            const targetId = await resolveRootLibId(ctx, isolateId);
+            const targetId = await ctx.getRootLibId(isolateId);
             const result = await ctx.call<EvaluateResult>('evaluate', {
                 isolateId,
                 targetId,
@@ -92,11 +62,3 @@ export const evaluateDartTool: ToolDefinition<Input> = {
         }
     },
 };
-
-/**
- * Test-only helper to reset the in-process root-library cache between cases.
- * Not exported through the public barrel; imported via direct path in tests.
- */
-export function _clearRootLibCacheForTests(): void {
-    rootLibCache.clear();
-}

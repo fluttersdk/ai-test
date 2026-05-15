@@ -4,10 +4,11 @@ import {
     evaluateDartTool,
     getRoutesTool,
     getWidgetTreeTool,
+    VALIDATING_HANDLERS,
 } from '../src/tools/index.js';
-import { _clearRootLibCacheForTests } from '../src/tools/evaluate_dart.js';
 import { VmServiceError } from '../src/vm_service_client.js';
 import type { ToolContext } from '../src/tools/index.js';
+import type { IsolateInfo } from '../src/types.js';
 
 interface FakeClient {
     isolateId: string;
@@ -26,15 +27,28 @@ function fakeClient(canned: Record<string, unknown> = {}): FakeClient {
 }
 
 function context(client: FakeClient): ToolContext {
+    const call = async <T = unknown>(method: string, params?: object): Promise<T> => {
+        client.calls.push({ method, params });
+        if (!client.canned.has(method)) {
+            throw new VmServiceError(method, -32000, `no canned response for ${method}`);
+        }
+        return client.canned.get(method) as T;
+    };
+    // Per-fake rootLib cache mirroring VmServiceClient's behaviour, so tests
+    // can assert getIsolate is invoked exactly once across multiple evaluate calls.
+    const rootLibCache = new Map<string, string>();
     return {
         getIsolateId: vi.fn(async (): Promise<string> => client.isolateId),
-        call: async <T = unknown>(method: string, params?: object): Promise<T> => {
-            client.calls.push({ method, params });
-            if (!client.canned.has(method)) {
-                throw new VmServiceError(method, -32000, `no canned response for ${method}`);
-            }
-            return client.canned.get(method) as T;
-        },
+        getRootLibId: vi.fn(async (isolateId: string): Promise<string> => {
+            const cached = rootLibCache.get(isolateId);
+            if (cached) return cached;
+            const iso = await call<IsolateInfo>('getIsolate', { isolateId });
+            const id = iso.rootLib?.id;
+            if (!id) throw new VmServiceError('getIsolate', -32000, 'missing rootLib.id');
+            rootLibCache.set(isolateId, id);
+            return id;
+        }),
+        call,
     };
 }
 
@@ -107,7 +121,6 @@ describe('evaluate_dart tool', () => {
     let ctx: ToolContext;
 
     beforeEach(() => {
-        _clearRootLibCacheForTests();
         client = fakeClient({
             getIsolate: {
                 type: 'Isolate',
@@ -129,9 +142,11 @@ describe('evaluate_dart tool', () => {
     });
 
     it('rejects empty expressions via zod validation', async () => {
-        await expect(evaluateDartTool.handler(ctx, { expression: '' })).rejects.toBeInstanceOf(
-            McpError,
-        );
+        // Validation lives in the VALIDATING_HANDLERS wrapper; the raw
+        // tool.handler accepts already-validated input.
+        const validatingHandler = VALIDATING_HANDLERS.get('evaluate_dart');
+        if (!validatingHandler) throw new Error('evaluate_dart validating handler missing');
+        await expect(validatingHandler(ctx, { expression: '' })).rejects.toBeInstanceOf(McpError);
     });
 
     it('resolves rootLib once via getIsolate then calls evaluate with that targetId', async () => {

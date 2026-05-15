@@ -2,7 +2,7 @@ library;
 
 import 'dart:convert';
 
-import 'package:ai_test_flutter/src/extensions.dart';
+import 'package:ai_test_flutter/ai_test_flutter.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import type { VmInfo } from './types.js';
+import type { VmInfo, IsolateInfo } from './types.js';
 
 /**
  * Typed JSON-RPC error raised by `VmServiceClient` whenever the VM Service
@@ -51,6 +51,7 @@ export class VmServiceClient {
     private _socket: WebSocket | null = null;
     private _nextId = 1;
     private readonly _pending = new Map<number, PendingCall>();
+    private readonly _rootLibCache = new Map<string, string>();
 
     public constructor(uri: string) {
         this._uri = uri;
@@ -135,6 +136,40 @@ export class VmServiceClient {
             );
         }
         return first.id;
+    }
+
+    /**
+     * Resolve (and cache) the root library id for the given isolate.
+     *
+     * The Dart VM `evaluate` RPC needs a `targetId` whose scope hosts the
+     * imports the expression should resolve against. The Flutter DevTools
+     * convention is `package:<app>/main.dart`, the entry library that
+     * transitively imports controllers + the Magic facade barrel.
+     *
+     * Cached per isolate id, so a reconnect against a fresh isolate
+     * invalidates the cache naturally.
+     */
+    public async getRootLibId(isolateId: string): Promise<string> {
+        const cached = this._rootLibCache.get(isolateId);
+        if (cached) return cached;
+        const isolate = await this.call<IsolateInfo>('getIsolate', { isolateId });
+        const rootLibId = isolate.rootLib?.id;
+        if (!rootLibId) {
+            throw new VmServiceError(
+                'getIsolate',
+                -32000,
+                'isolate response missing rootLib.id',
+            );
+        }
+        this._rootLibCache.set(isolateId, rootLibId);
+        return rootLibId;
+    }
+
+    /**
+     * Test-only helper to reset the in-process root-library cache between cases.
+     */
+    public clearRootLibCacheForTests(): void {
+        this._rootLibCache.clear();
     }
 
     /**

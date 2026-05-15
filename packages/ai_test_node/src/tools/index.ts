@@ -25,6 +25,11 @@ export interface ToolContext {
      */
     getIsolateId(): Promise<string>;
     /**
+     * Resolve (and cache) the root library id for the given isolate. Delegates
+     * to `VmServiceClient.getRootLibId`, which owns the per-isolate cache.
+     */
+    getRootLibId(isolateId: string): Promise<string>;
+    /**
      * Send a JSON-RPC request to the VM Service.
      */
     call<T = unknown>(method: string, params?: object): Promise<T>;
@@ -86,35 +91,57 @@ function makeValidatingHandler<TInput>(
     };
 }
 
-// Wrap each tool's handler so unit tests calling `tool.handler(ctx, args)` go
-// through zod validation. The wrapping rebinds `handler` in place via a
-// readonly-mutating cast; this is the documented sealing pattern used in the
-// MCP SDK examples.
-for (const [tool, schema] of [
-    [getWidgetTreeTool, getWidgetTreeTool.inputSchema] as const,
-    [evaluateDartTool, evaluateDartTool.inputSchema] as const,
-    [getRoutesTool, getRoutesTool.inputSchema] as const,
-]) {
-    const inner = tool.handler.bind(tool);
-    (tool as { handler: unknown }).handler = makeValidatingHandler(
-        { handler: inner as (ctx: ToolContext, args: unknown) => Promise<ToolResult> },
-        schema as z.ZodType<unknown>,
-        tool.name,
-    );
-    // parseInput stays exported-shape only for tooling that wants to validate
-    // outside the handler path. Keep it referenced so dead-code elimination
-    // doesn't drop it.
-    void parseInput;
-}
-
 /**
- * All MCP tools the server exposes, in registration order.
+ * All MCP tools the server exposes, in registration order. The handler stored
+ * on each `ToolDefinition` accepts already-validated input; the validating
+ * wrappers in `VALIDATING_HANDLERS` below sit on top for transport-level callers
+ * (the MCP server) and direct unit-test invocations.
  */
 export const ALL_TOOLS: ReadonlyArray<ToolDefinition<unknown>> = [
     getWidgetTreeTool as ToolDefinition<unknown>,
     evaluateDartTool as ToolDefinition<unknown>,
     getRoutesTool as ToolDefinition<unknown>,
 ];
+
+/**
+ * Validating-handler lookup keyed by tool name. Built once at module load by
+ * wrapping each tool's raw handler with `makeValidatingHandler`. This keeps the
+ * `ToolDefinition.handler` slot immutable (no readonly-cast tricks) while still
+ * giving callers a one-stop validating dispatch.
+ */
+export const VALIDATING_HANDLERS: ReadonlyMap<
+    string,
+    (ctx: ToolContext, args: unknown) => Promise<ToolResult>
+> = new Map([
+    [
+        getWidgetTreeTool.name,
+        makeValidatingHandler(
+            getWidgetTreeTool,
+            getWidgetTreeTool.inputSchema as z.ZodType<unknown>,
+            getWidgetTreeTool.name,
+        ),
+    ],
+    [
+        evaluateDartTool.name,
+        makeValidatingHandler(
+            evaluateDartTool,
+            evaluateDartTool.inputSchema as z.ZodType<unknown>,
+            evaluateDartTool.name,
+        ),
+    ],
+    [
+        getRoutesTool.name,
+        makeValidatingHandler(
+            getRoutesTool,
+            getRoutesTool.inputSchema as z.ZodType<unknown>,
+            getRoutesTool.name,
+        ),
+    ],
+]);
+
+// `parseInput` is exported in shape only for callers that want to validate
+// outside the handler path. Reference it once so dead-code elimination keeps it.
+void parseInput;
 
 /**
  * Register the MCP `tools/list` and `tools/call` handlers on the given Server
@@ -130,6 +157,9 @@ export function registerAll(server: Server, vmClient: VmServiceClient): void {
             if (cachedIsolateId) return cachedIsolateId;
             cachedIsolateId = await vmClient.getMainIsolateId();
             return cachedIsolateId;
+        },
+        getRootLibId(isolateId: string) {
+            return vmClient.getRootLibId(isolateId);
         },
         call<T>(method: string, params?: object) {
             return vmClient.call<T>(method, params ?? {});
@@ -150,11 +180,11 @@ export function registerAll(server: Server, vmClient: VmServiceClient): void {
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: rawArgs } = request.params;
-        const tool = ALL_TOOLS.find((t) => t.name === name);
-        if (!tool) {
+        const handler = VALIDATING_HANDLERS.get(name);
+        if (!handler) {
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
         }
-        const result = await tool.handler(ctx, rawArgs ?? {});
+        const result = await handler(ctx, rawArgs ?? {});
         return {
             content: result.content.map((c) => ({ type: c.type, text: c.text })),
         };

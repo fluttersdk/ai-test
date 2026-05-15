@@ -40,7 +40,10 @@ Future<developer.ServiceExtensionResponse> aiTestGetRoutesHandler(
       jsonEncode(response),
     );
   } catch (e) {
-    return developer.ServiceExtensionResponse.error(-1, e.toString());
+    return developer.ServiceExtensionResponse.error(
+      developer.ServiceExtensionResponse.extensionError,
+      e.toString(),
+    );
   }
 }
 
