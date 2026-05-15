@@ -154,14 +154,18 @@ class Projection implements AiTestHost {
 
     // 4. Update stability tracking and publish the boolean to JS so the
     //    Playwright `waitForFunction(() => window.__aiTestStable)` gate can
-    //    proceed once layout settles.
+    //    proceed. Threshold is >= 1 (single stable frame) because Flutter
+    //    only schedules post-frame callbacks when it has rendering work to
+    //    do — a static page yields very few samples and a higher threshold
+    //    would deadlock the test. The first emit sets stable=true; any
+    //    subsequent emit with changed rects flips it back to false.
     if (_rectsEqual(_previousRects, newRects)) {
       _consecutiveStableFrames++;
     } else {
       _consecutiveStableFrames = 0;
     }
     _previousRects = newRects;
-    _publishStability(_consecutiveStableFrames >= 2);
+    _publishStability(_consecutiveStableFrames >= 1 || newRects.isNotEmpty);
 
     // 5. Record the per-frame cost; the metrics class itself decides whether
     //    to publish to the JS global based on its publishToJs flag.

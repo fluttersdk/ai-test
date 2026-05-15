@@ -17,7 +17,7 @@ void main() {
   setUp(AiTestBinding.resetForTesting);
 
   test(
-    'ensureInitialized is no-op when kDebugMode is false',
+    'ensureInitialized is no-op when not-release flag (debug || profile) is false',
     () {
       final host = _SpyHost();
 

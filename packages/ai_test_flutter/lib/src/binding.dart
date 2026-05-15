@@ -26,8 +26,12 @@ abstract class AiTestHost {
 /// ## Activation gate
 ///
 /// Activation requires ALL of:
-/// 1. `kDebugMode == true` (release builds are always a no-op; the binding
-///    tree-shakes cleanly under `flutter build web --release`).
+/// 1. `kReleaseMode == false` — i.e. debug OR profile build. Release builds
+///    are always a no-op; the binding tree-shakes cleanly under
+///    `flutter build web --release`. Profile is included so per-frame
+///    measurement reflects realistic dart2js-optimized cost (debug-mode
+///    measurements are 2-5x inflated and useless for the spike's <3ms p95
+///    acceptance threshold).
 /// 2. At least one of the flag signals is `"1"`:
 ///    - The compile-time dart-define `AI_TEST` (set via
 ///      `--dart-define=AI_TEST=1`).
@@ -93,8 +97,11 @@ class AiTestBinding {
   }) {
     if (_activated) return;
 
-    // 1. Resolve the debug-mode flag.
-    final bool isDebug = overrideDebugMode ?? kDebugMode;
+    // 1. Resolve the non-release flag (debug OR profile, NOT release).
+    //    Profile builds set kReleaseMode=false; spike measurement targets
+    //    profile so this gate must accept it. Release tree-shakes the
+    //    binding entirely.
+    final bool isDebug = overrideDebugMode ?? !kReleaseMode;
 
     // 2. Resolve the dart-define signal.
     //    The literal 'AI_TEST' is intentionally hardcoded — see class docblock.
