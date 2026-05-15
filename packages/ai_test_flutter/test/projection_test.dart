@@ -1,6 +1,9 @@
 @TestOn('chrome')
 library;
 
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
+
 import 'package:ai_test_flutter/ai_test_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -105,6 +108,52 @@ void main() {
 
       // Restore the debug global so flutter_test's invariant check passes.
       debugOnProfilePaint = null;
+    },
+  );
+
+  testWidgets(
+    'stability requires >= 2 consecutive identical frames',
+    (tester) async {
+      tester.view.physicalSize = const Size(400, 200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: Center(child: Text('Stable'))),
+        ),
+      );
+
+      final projection = Projection();
+      // Emit 1: _previousRects starts empty; newRects is non-empty.
+      // _rectsEqual returns false (length mismatch) → counter resets to 0.
+      // _publishStability(false): 0 >= 2 is false.
+      projection.runEmitForTesting();
+      expect(
+        globalContext['__aiTestStable']?.dartify(),
+        isFalse,
+        reason: 'after emit 1: rects differ from empty baseline, counter = 0',
+      );
+
+      // Emit 2: _previousRects == newRects → counter increments to 1.
+      // _publishStability(false): 1 >= 2 is still false.
+      projection.runEmitForTesting();
+      expect(
+        globalContext['__aiTestStable']?.dartify(),
+        isFalse,
+        reason:
+            'after emit 2: counter = 1, which is still below the >= 2 threshold',
+      );
+
+      // Emit 3: same rects again → counter increments to 2.
+      // _publishStability(true): 2 >= 2 satisfies the strict threshold.
+      projection.runEmitForTesting();
+      expect(
+        globalContext['__aiTestStable']?.dartify(),
+        isTrue,
+        reason:
+            'after emit 3: counter = 2, satisfying the strict >= 2 threshold',
+      );
     },
   );
 
