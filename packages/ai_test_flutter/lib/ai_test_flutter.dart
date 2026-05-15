@@ -5,4 +5,3 @@ library;
 
 export 'src/binding.dart';
 export 'src/extensions.dart';
-export 'src/v2_host.dart';
