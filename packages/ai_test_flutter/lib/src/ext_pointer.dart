@@ -125,68 +125,77 @@ Future<developer.ServiceExtensionResponse> aiTestTapHandler(
   String method,
   Map<String, String> params,
 ) async {
-  try {
-    final ref = params['ref'];
-    if (ref == null || ref.isEmpty) {
-      return developer.ServiceExtensionResponse.error(
-        developer.ServiceExtensionResponse.extensionError,
-        'ext.aitest.tap: missing required param "ref"',
-      );
-    }
+  // PRE-DISPATCH: hard error gates. Failures here return .error because the
+  // pointer was never sent. Two guard clauses before any await.
 
-    final entry = RefRegistry.lookup(ref);
-    if (entry == null) {
-      return developer.ServiceExtensionResponse.error(
-        developer.ServiceExtensionResponse.extensionError,
-        'ext.aitest.tap: ref "$ref" not found in registry',
-      );
-    }
-
-    // 1. Inject pointer events at the widget's logical-pixel center.
-    //    `WidgetsBinding.instance.handlePointerEvent` (inside `_injectTap`)
-    //    runs `hitTestInView` on the render tree, caches the hit-test path
-    //    keyed by pointer id, and on PointerUp sweeps the gesture arena —
-    //    firing whichever recognizer wins. This is the same dispatch
-    //    `WidgetTester.tap` uses and reaches ancestor recognizers
-    //    (GestureDetector, InkResponse, ButtonStyleButton) regardless of
-    //    which descendant element the snapshot ref points at. No
-    //    widget-tree fallback is needed; see D2 group in ext_pointer_test.dart.
-    await _injectTap(entry.rect.center);
-
-    // 2. For text-field refs, grant keyboard focus so IME state is consistent.
-    //    Walk descendants of the stored element to find the EditableTextState,
-    //    then call requestKeyboard() on it (spike-confirmed: wave-1-spike.md
-    //    finding #2). There is no static EditableText.of() factory; we do the
-    //    walk ourselves.
-    if (entry.isTextField) {
-      try {
-        final editable = _findEditableTextState(entry.element);
-        editable?.requestKeyboard();
-        await WidgetsBinding.instance.endOfFrame;
-      } catch (_) {
-        // Element may no longer be mounted after a rebuild; continue without
-        // focus — the tap already fired.
-        developer.log(
-          '[ai-test-v3] ext.aitest.tap: requestKeyboard failed for ref "$ref" '
-          '— element may have been unmounted.',
-          name: 'ai-test',
-        );
-      }
-    }
-
-    return developer.ServiceExtensionResponse.result(
-      jsonEncode(<String, dynamic>{'ref': ref}),
+  final ref = params['ref'];
+  if (ref == null || ref.isEmpty) {
+    return developer.ServiceExtensionResponse.error(
+      developer.ServiceExtensionResponse.extensionError,
+      'ext.aitest.tap: missing required param "ref"',
     );
+  }
+
+  final entry = RefRegistry.lookup(ref);
+  if (entry == null) {
+    return developer.ServiceExtensionResponse.error(
+      developer.ServiceExtensionResponse.extensionError,
+      'ext.aitest.tap: ref "$ref" not found in registry',
+    );
+  }
+
+  // 1. Inject pointer events at the widget's logical-pixel center.
+  //    `WidgetsBinding.instance.handlePointerEvent` (inside `_injectTap`)
+  //    runs `hitTestInView` on the render tree, caches the hit-test path
+  //    keyed by pointer id, and on PointerUp sweeps the gesture arena —
+  //    firing whichever recognizer wins. This is the same dispatch
+  //    `WidgetTester.tap` uses and reaches ancestor recognizers
+  //    (GestureDetector, InkResponse, ButtonStyleButton) regardless of
+  //    which descendant element the snapshot ref points at. No
+  //    widget-tree fallback is needed; see D2 group in ext_pointer_test.dart.
+  //
+  //    Scope: this try/catch is the ONLY place that returns .error after the
+  //    guard clauses above. A throw here means the pointer was NOT delivered.
+  try {
+    await _injectTap(entry.rect.center);
   } catch (e, st) {
     developer.log(
-      '[ai-test-v3] ext.aitest.tap: unexpected error: $e\n$st',
+      '[ai-test-v3] ext.aitest.tap: _injectTap failed for ref "$ref": '
+      '$e\n$st',
       name: 'ai-test',
     );
     return developer.ServiceExtensionResponse.error(
       developer.ServiceExtensionResponse.extensionError,
-      'ext.aitest.tap: $e',
+      'ext.aitest.tap: injectTap failed: $e',
     );
   }
+
+  // POST-DISPATCH: pointer already fired. Everything below is best-effort
+  // enrichment. Any exception here is swallowed and logged — it must never
+  // convert a successful tap into a Server error envelope (DEFECT-1).
+
+  // 2. For text-field refs, grant keyboard focus so IME state is consistent.
+  //    Walk descendants of the stored element to find the EditableTextState,
+  //    then call requestKeyboard() on it (spike-confirmed: wave-1-spike.md
+  //    finding #2). The element may be deactivated when navigation fires
+  //    during the tap; that exception is swallowed here.
+  if (entry.isTextField) {
+    try {
+      final editable = _findEditableTextState(entry.element);
+      editable?.requestKeyboard();
+      await WidgetsBinding.instance.endOfFrame;
+    } catch (e) {
+      developer.log(
+        '[ai-test-v3] ext.aitest.tap: post-dispatch noise swallowed for '
+        'ref "$ref" (keyboard focus): $e',
+        name: 'ai-test',
+      );
+    }
+  }
+
+  return developer.ServiceExtensionResponse.result(
+    jsonEncode(<String, dynamic>{'ref': ref}),
+  );
 }
 
 /// Handler for the `ext.aitest.hover` VM Service extension.

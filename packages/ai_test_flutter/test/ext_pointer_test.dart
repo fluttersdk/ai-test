@@ -602,4 +602,221 @@ void main() {
       expect(registerPointerExtensions, returnsNormally);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // D1 — tap envelope early-return + swallow post-dispatch noise
+  //
+  // DEFECT-1: tapping a navigation-triggering button returned a Server error
+  // envelope to MCP even though the route actually changed, because any
+  // exception raised AFTER `_injectTap` dispatched (e.g., accessing a
+  // deactivated element during the post-dispatch keyboard-focus step) was
+  // caught by the outer try/catch and converted to `.error`.
+  //
+  // After the D1 fix, the outer try/catch only covers PRE-dispatch code
+  // (ref validation + `_injectTap` call). Post-dispatch code runs in its own
+  // inner try/catch that logs but returns `.result` even when it throws.
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.tap — D1 envelope early-return', () {
+    testWidgets(
+        'returns OK envelope when tap triggers navigation (DEFECT-1 regression)',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      // 1. Build a two-route app. The home page has a GestureDetector that
+      //    navigates to '/elsewhere' on tap. Navigation unmounts the current
+      //    page's element tree mid-dispatch and may trigger post-dispatch
+      //    rebuild noise that the outer try/catch could incorrectly surface
+      //    as `.error` (DEFECT-1).
+      var navigated = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          initialRoute: '/',
+          routes: <String, WidgetBuilder>{
+            '/': (_) => Scaffold(
+                  body: Center(
+                    child: Builder(
+                      builder: (BuildContext ctx) => GestureDetector(
+                        key: const ValueKey('nav-btn'),
+                        onTap: () {
+                          navigated = true;
+                          Navigator.of(ctx).pushNamed('/elsewhere');
+                        },
+                        child: const SizedBox(
+                          width: 200,
+                          height: 60,
+                          child: ColoredBox(color: Colors.blue),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            '/elsewhere': (_) => const Scaffold(
+                  body: Center(child: Text('Elsewhere')),
+                ),
+          },
+        ),
+      );
+
+      // 2. Register the navigation button's ref.
+      final navElement = tester.element(find.byKey(const ValueKey('nav-btn')));
+      final navBox = navElement.findRenderObject()! as RenderBox;
+      final navRect = navBox.localToGlobal(Offset.zero) & navBox.size;
+      final navRef = RefRegistry.registerForTesting(
+        rect: navRect,
+        element: navElement,
+        groupId: 'test-d1-nav',
+        isTextField: false,
+      );
+
+      // 3. Start handler without awaiting — it calls endOfFrame internally,
+      //    which only resolves after tester.pump().
+      final future = aiTestTapHandler(
+        'ext.aitest.tap',
+        <String, String>{'ref': navRef},
+      );
+
+      // 4. Advance 50ms (Down→Up delay) then pump frames to resolve
+      //    _injectTap's two endOfFrame awaits and the navigation animation.
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump();
+      await tester.pump();
+
+      final response = await future;
+
+      // 5. Navigation must have been triggered AND the handler must return
+      //    .result — not .error. This is the DEFECT-1 invariant: pointer
+      //    dispatch success must not be shadowed by post-dispatch noise.
+      expect(navigated, isTrue, reason: 'onTap navigation callback must fire');
+      expect(
+        response.errorCode,
+        isNull,
+        reason: 'Tap on a navigation button must return .result (OK), not '
+            '.error, even though the element tree changed after dispatch.',
+      );
+      final body = jsonDecode(response.result!) as Map<String, dynamic>;
+      expect(body['ref'], equals(navRef));
+    });
+
+    testWidgets(
+        'returns OK when isTextField=true element unmounts post-dispatch',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+
+      // 1. Build an app with a text field that navigates away when tapped
+      //    (simulating a "search bar → results page" flow). The text-field
+      //    ref is registered; after the tap fires navigation, the field is
+      //    unmounted — requestKeyboard() must be swallowed, not propagated.
+      await tester.pumpWidget(
+        MaterialApp(
+          initialRoute: '/',
+          routes: <String, WidgetBuilder>{
+            '/': (_) => Scaffold(
+                  body: Column(
+                    children: <Widget>[
+                      Builder(
+                        builder: (BuildContext ctx) => GestureDetector(
+                          onTap: () =>
+                              Navigator.of(ctx).pushNamed('/elsewhere'),
+                          child: AbsorbPointer(
+                            child: TextField(
+                              key: const ValueKey('search-field'),
+                              controller: controller,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            '/elsewhere': (_) => const Scaffold(
+                  body: Center(child: Text('Results')),
+                ),
+          },
+        ),
+      );
+
+      // 2. Register the text-field ref with isTextField=true.
+      final element =
+          tester.element(find.byKey(const ValueKey('search-field')));
+      final box = element.findRenderObject()! as RenderBox;
+      final rect = box.localToGlobal(Offset.zero) & box.size;
+      final ref = RefRegistry.registerForTesting(
+        rect: rect,
+        element: element,
+        groupId: 'test-d1-tf-nav',
+        isTextField: true,
+      );
+
+      // 3. Drive the handler: tap fires navigation; post-dispatch keyboard
+      //    focus step runs on a now-unmounted element. Must still return OK.
+      final future = aiTestTapHandler(
+        'ext.aitest.tap',
+        <String, String>{'ref': ref},
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pumpAndSettle();
+
+      final response = await future;
+
+      // 4. Response must be .result even though requestKeyboard() may have
+      //    failed on the unmounted element. Post-dispatch noise is swallowed.
+      expect(
+        response.errorCode,
+        isNull,
+        reason: 'Post-dispatch requestKeyboard failure on unmounted element '
+            'must be swallowed; handler must return .result.',
+      );
+      final body = jsonDecode(response.result!) as Map<String, dynamic>;
+      expect(body['ref'], equals(ref));
+    });
+
+    test('returns .error when ref param is empty (hard pre-dispatch error)',
+        () async {
+      // Hard pre-dispatch gate: empty ref must never return .result.
+      final response = await aiTestTapHandler(
+        'ext.aitest.tap',
+        const <String, String>{'ref': ''},
+      );
+      expect(
+        response.errorCode,
+        equals(developer.ServiceExtensionResponse.extensionError),
+        reason: 'Empty ref is a hard pre-dispatch error; must return .error.',
+      );
+    });
+
+    test(
+        'returns .error when ref is stale (removed from registry after snapshot)',
+        () async {
+      // Simulate the "snapshot → navigate → tap old ref" pattern.
+      // The ref is registered under a group, then that group is disposed
+      // (as happens when flutter_snapshot runs on a new route and disposes
+      // the old snapshot's group).
+      final staleRef = RefRegistry.register(
+        rect: const Rect.fromLTWH(0, 0, 100, 50),
+        element: WidgetsBinding.instance.rootElement!,
+        groupId: 'stale-group',
+        isTextField: false,
+      );
+      RefRegistry.disposeGroup('stale-group');
+      // staleRef lookup now returns null — hard pre-dispatch error.
+
+      final response = await aiTestTapHandler(
+        'ext.aitest.tap',
+        <String, String>{'ref': staleRef},
+      );
+      expect(
+        response.errorCode,
+        equals(developer.ServiceExtensionResponse.extensionError),
+        reason: 'Stale ref (group disposed) must return .error, not silent OK.',
+      );
+    });
+  });
 }
