@@ -1,5 +1,5 @@
 name: ai_test_flutter_example
-description: Phase 0 probe app for Architecture B (Shadow DOM Projection) validation.
+description: V3 fixture app — exercises every plugin extension via integration_test.
 version: 0.0.1-dev
 publish_to: none
 
@@ -12,4 +12,12 @@ dependencies:
     sdk: flutter
   ai_test_flutter:
     path: ../
+  http: ^1.2.0
   web: ^1.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  magic: ^1.0.0-alpha.12
