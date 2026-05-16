@@ -166,5 +166,56 @@ void main() {
       // Internal buffer must not have grown.
       expect(AiTestHttpInterceptor.recentRequests(), hasLength(1));
     });
+
+    test('attributedHeuristically set when multiple concurrent pending', () {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/a',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onRequest(MagicRequest(
+        url: '/b',
+        method: 'POST',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final entries = AiTestHttpInterceptor.recentRequests();
+      expect(entries, hasLength(1));
+      expect(entries.first['attributedHeuristically'], isTrue,
+          reason: 'concurrent in-flight requests must flag the entry');
+    });
+
+    test('no attributedHeuristically flag when single pending in flight', () {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/single',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final entries = AiTestHttpInterceptor.recentRequests();
+      expect(entries, hasLength(1));
+      expect(entries.first.containsKey('attributedHeuristically'), isFalse,
+          reason: 'single-pending case is exact, no flag');
+    });
   });
 }

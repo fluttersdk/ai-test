@@ -324,6 +324,7 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
     int? durationMs;
     String url = request?.url ?? '';
     String method = request?.method ?? '';
+    bool attributedHeuristically = false;
 
     if (request != null) {
       final key = '${request.method}:${request.url}';
@@ -332,12 +333,30 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
         durationMs = DateTime.now().difference(started).inMilliseconds;
       }
     } else if (_pending.isNotEmpty) {
-      // No request object on response — consume the earliest pending entry.
+      // No request object on response — `MagicResponse` carries no request ref
+      // (verified at magic/lib/src/network/magic_response.dart). Best-effort
+      // attribution: consume the EARLIEST pending entry (FIFO). For a single
+      // in-flight request this is exact. With concurrent requests it can
+      // misattribute URL/method — emit a warning so downstream consumers
+      // (D9 wait_for_request, agent loops) know to treat the result as
+      // heuristic. The buffer entry flags `attributedHeuristically: true`
+      // when ambiguous so MCP consumers can surface it.
+      attributedHeuristically = _pending.length > 1;
+      if (attributedHeuristically) {
+        developer.log(
+          '[ai-test-v3] interceptor: ${_pending.length} concurrent pending '
+          'requests; attributing response via FIFO heuristic. Consumers '
+          'should treat url/method as best-effort.',
+          name: 'ai-test',
+        );
+      }
       final key = _pending.keys.first;
       final started = _pending.remove(key);
-      final parts = key.split(':');
-      method = parts.first;
-      url = parts.length > 1 ? parts.sublist(1).join(':') : '';
+      final colon = key.indexOf(':');
+      if (colon > 0) {
+        method = key.substring(0, colon);
+        url = key.substring(colon + 1);
+      }
       if (started != null) {
         durationMs = DateTime.now().difference(started).inMilliseconds;
       }
@@ -350,6 +369,7 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
       'durationMs': durationMs,
       'isError': isError,
       'timestamp': DateTime.now().toIso8601String(),
+      if (attributedHeuristically) 'attributedHeuristically': true,
     };
   }
 
