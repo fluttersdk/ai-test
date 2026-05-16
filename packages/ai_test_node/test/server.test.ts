@@ -42,8 +42,9 @@ const EXPECTED_TOOL_NAMES: ReadonlyArray<string> = [
  * pair of in-memory transports. The returned `cleanup` closes both sides.
  *
  * Using in-memory transport keeps the test hermetic: no WebSocket, no stdio,
- * no real VM Service connection. The lazy `VmServiceClient` inside
- * `createServer` never connects because the stub handlers never call it.
+ * no real VM Service connection. Real handlers that contact the VM Service
+ * (all except `flutter_resize` and `flutter_file_upload`) will fail with a
+ * connection error, which the tool wrappers return as `{ isError: true }`.
  */
 async function bootInMemoryServer(): Promise<{
     client: Client;
@@ -98,25 +99,53 @@ describe('createServer()', () => {
         }
     });
 
-    it('returns NOT YET IMPLEMENTED isError envelope for every stub tool', async () => {
+    it('never returns the NOT YET IMPLEMENTED sentinel — real Wave 6 handlers are wired', async () => {
+        // Wave 6 real handlers are now wired. The stub sentinel
+        // "NOT YET IMPLEMENTED" must not appear in any tool response:
+        //
+        // - Tools requiring VM Service access return a connection-error
+        //   envelope (`isError: true`) because no Flutter app is running.
+        // - `flutter_close_app` succeeds (disconnect is a no-op when the
+        //   lazy client was never connected) and returns `{closed: true}`.
+        // - `flutter_resize` returns `isError: true` (ALPHA stub).
+        // - `flutter_file_upload` returns `isError: true` (V3.1 deferred).
+        //
+        // In all cases the "NOT YET IMPLEMENTED" text must be absent.
         const { client, cleanup } = await bootInMemoryServer();
         try {
             for (const name of EXPECTED_TOOL_NAMES) {
                 const result = await client.callTool({
                     name,
-                    // Empty args. Tools may have required fields; the stub returns
-                    // its NOT YET IMPLEMENTED envelope BEFORE consulting args, so
-                    // missing fields must not block this smoke check. If a stub
-                    // ever rejects on validation it will throw and fail the test.
-                    arguments: {},
+                    // Supply extra fields so zod validation passes for tools
+                    // with required args (flutter_navigate needs `route`,
+                    // flutter_tap needs `ref`, flutter_resize needs
+                    // `width` + `height`, etc.). Extra keys are ignored by
+                    // tools that do not declare them in their inputSchema.
+                    arguments: {
+                        route: '/test',
+                        ref: 'e1',
+                        startRef: 'e1',
+                        endRef: 'e2',
+                        values: ['a'],
+                        paths: ['/tmp/a.txt'],
+                        key: 'Enter',
+                        expression: 'true',
+                        condition: 'true',
+                        width: 1280,
+                        height: 800,
+                        pattern: '/api/*',
+                        response: {},
+                    },
                 });
-                expect(result.isError, `${name} must be isError=true`).toBe(true);
                 const content = result.content as ReadonlyArray<{
                     type: string;
                     text?: string;
                 }>;
-                expect(content[0]?.type).toBe('text');
-                expect(content[0]?.text).toBe('NOT YET IMPLEMENTED');
+                expect(content[0]?.type, `${name} content[0].type`).toBe('text');
+                expect(
+                    content[0]?.text,
+                    `${name} must NOT return the stub sentinel`,
+                ).not.toBe('NOT YET IMPLEMENTED');
             }
         } finally {
             await cleanup();
