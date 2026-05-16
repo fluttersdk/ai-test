@@ -107,8 +107,16 @@ class StartCommand extends Command<void> {
     final bool ddsOn = parsed['dds'] as bool;
     final bool profileStatic = parsed['profile-static'] as bool;
 
-    // 1. Build the launcher argv — Wave 1 amended set only.
-    final List<String> args = <String>[
+    // 1. Prepare the log file. flutter run's stdout/stderr stream here so
+    //    `ai_test_flutter logs --follow` can tail it after the CLI returns,
+    //    AND so the spawn can fully detach from the CLI's stdio (no pipe
+    //    keeps the parent alive). Truncated on every start.
+    final File logFile = File(_logPath());
+    await logFile.parent.create(recursive: true);
+    await logFile.writeAsString('');
+
+    // 2. Build the launcher argv — Wave 1 amended set only.
+    final List<String> flutterArgs = <String>[
       'run',
       '-d',
       'chrome',
@@ -117,19 +125,41 @@ class StartCommand extends Command<void> {
       '--dart-define=AI_TEST=1',
     ];
 
-    // 2. Spawn detached so the CLI can return while flutter keeps running.
-    final Process process = await _processStart(
+    // 3. Spawn through `nohup` so the child survives the CLI's exit. On
+    //    macOS, `Process.start(..., mode: ProcessStartMode.detachedWithStdio)`
+    //    keeps the pipe ends owned by the parent — once the CLI returns and
+    //    its FDs close, the child gets SIGPIPE on the next stdout write and
+    //    dies. nohup + shell redirection breaks the pipe ownership chain.
+    //    Tests inject a fake via [processStart] that bypasses this wrapper.
+    final List<String> wrapperArgs = <String>[
+      'nohup',
       'flutter',
-      args,
+      ...flutterArgs,
+    ];
+    final Process process = await _processStart(
+      'sh',
+      <String>[
+        '-c',
+        // Redirect all three streams to the log file, then exec the wrapper.
+        // `>>` instead of `>` because we want appends (truncation already
+        // happened above so we still start clean).
+        '${_shellQuote(wrapperArgs)} </dev/null >>${_shellQuote([
+              logFile.path
+            ])} 2>&1 & echo \$!',
+      ],
       mode: ProcessStartMode.detachedWithStdio,
     );
 
-    // 3. Scrape the VM service URI from stdout (timeout-guarded).
-    final String vmServiceUri = await _scrapeVmServiceUri(process);
+    // 4. The shell wrapper echoes the child PID on its (very short) stdout.
+    final int childPid = await _scrapeChildPid(process);
 
-    // 4. Persist state.json atomically.
+    // 5. Tail the log file for the VM service URI (timeout-guarded). Reading
+    //    from the file decouples from the wrapper process lifetime.
+    final String vmServiceUri = await _scrapeVmServiceUriFromFile(logFile);
+
+    // 6. Persist state.json atomically.
     await StateFile.write(<String, dynamic>{
-      'pid': process.pid,
+      'pid': childPid,
       'vmServiceUri': vmServiceUri,
       'webPort': webPort,
       'vmServicePort': vmServicePort,
@@ -138,42 +168,84 @@ class StartCommand extends Command<void> {
       'projectRoot': Directory.current.path,
     });
 
-    stdout.writeln('ai_test_flutter: flutter run pid=${process.pid}');
+    stdout.writeln('ai_test_flutter: flutter run pid=$childPid');
     stdout.writeln('ai_test_flutter: vmServiceUri=$vmServiceUri');
     stdout.writeln('ai_test_flutter: state=${StateFile.path}');
+    stdout.writeln('ai_test_flutter: log=${logFile.path}');
   }
 
-  /// Listens to [process].stdout until a line matches [_uriPattern], or throws
-  /// a [UsageException] after [uriScrapeTimeout].
-  Future<String> _scrapeVmServiceUri(Process process) async {
-    final Completer<String> completer = Completer<String>();
+  /// Reads the wrapper shell's stdout for the single `$!` line emitted after
+  /// the background spawn.
+  Future<int> _scrapeChildPid(Process process) async {
+    final Completer<int> completer = Completer<int>();
     late final StreamSubscription<String> sub;
 
     sub = process.stdout
         .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
         .listen((String line) {
-      final Match? match = _uriPattern.firstMatch(line);
-      if (match != null && !completer.isCompleted) {
-        completer.complete(match.group(1));
+      final String trimmed = line.trim();
+      final int? pid = int.tryParse(trimmed);
+      if (pid != null && !completer.isCompleted) {
+        completer.complete(pid);
         sub.cancel();
       }
     }, onError: (Object e, StackTrace s) {
-      if (!completer.isCompleted) {
-        completer.completeError(e, s);
-      }
+      if (!completer.isCompleted) completer.completeError(e, s);
     });
 
     try {
-      return await completer.future.timeout(uriScrapeTimeout);
+      return await completer.future.timeout(const Duration(seconds: 10));
     } on TimeoutException {
       await sub.cancel();
       throw UsageException(
-        'Timed out after ${uriScrapeTimeout.inSeconds}s waiting for the VM '
-        'service URI line on flutter stdout. Is `flutter run -d chrome` able '
-        'to launch from this directory? Run `flutter doctor` and try again.',
+        'Timed out waiting for the wrapper shell to echo the flutter run '
+        'PID. Is `nohup` available on PATH?',
         usage,
       );
     }
+  }
+
+  /// Polls [logFile] every 250 ms until a line matches [_uriPattern].
+  Future<String> _scrapeVmServiceUriFromFile(File logFile) async {
+    final Stopwatch elapsed = Stopwatch()..start();
+    int lastSize = 0;
+    while (elapsed.elapsed < uriScrapeTimeout) {
+      if (logFile.existsSync()) {
+        final int size = logFile.lengthSync();
+        if (size > lastSize) {
+          final String chunk = logFile.readAsStringSync();
+          for (final String line in const LineSplitter().convert(chunk)) {
+            final Match? match = _uriPattern.firstMatch(line);
+            if (match != null) return match.group(1)!;
+          }
+          lastSize = size;
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    throw UsageException(
+      'Timed out after ${uriScrapeTimeout.inSeconds}s waiting for the VM '
+      'service URI line in ${logFile.path}. Run `flutter doctor` and inspect '
+      'the log directly with `ai_test_flutter logs`.',
+      usage,
+    );
+  }
+
+  /// Shell-quotes a list of argv tokens for safe `sh -c` interpolation.
+  /// Bareword tokens (alphanumerics + `_./=:-`) pass through unquoted;
+  /// anything else gets single-quoted with embedded quotes escaped.
+  static String _shellQuote(List<String> tokens) {
+    final RegExp bareword = RegExp(r'^[A-Za-z0-9_./=:-]+$');
+    return tokens.map((String t) {
+      if (bareword.hasMatch(t)) return t;
+      return "'${t.replaceAll("'", r"'\''")}'";
+    }).join(' ');
+  }
+
+  /// Resolves the captured-stdout log path: same parent as [StateFile.path]
+  /// so `StateFile.debugHomeOverride` propagates into tests transparently.
+  static String _logPath() {
+    return '${File(StateFile.path).parent.path}/flutter-dev.log';
   }
 }

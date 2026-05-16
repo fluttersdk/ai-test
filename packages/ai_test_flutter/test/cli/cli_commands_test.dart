@@ -310,11 +310,19 @@ void main() {
 
   group('Integration: start → status → stop', () {
     test('pipeline writes and removes state correctly', () async {
-      // 1. Start: inject a fake process starter that returns a scripted Process.
-      final _FakeProcess fakeProcess = _FakeProcess.withUriLine(
-        'Debug service listening on ws://127.0.0.1:8181/integ_tok/ws',
-        pid: 5555,
-      );
+      // 1. Start: deferred-seed log file with URI line + inject a fake shell
+      //    that echoes the child PID. StartCommand.run() truncates the log
+      //    file at entry, so seed AFTER truncation via a delayed write; new
+      //    wrapper writes flutter stdout to the log file and reads URI from
+      //    there. Wrapper shell's own stdout only emits `$!`.
+      Future<void>.delayed(const Duration(milliseconds: 50), () {
+        final Directory dir = Directory('${tempHome.path}/.ai-test');
+        if (!dir.existsSync()) dir.createSync();
+        File('${dir.path}/flutter-dev.log').writeAsStringSync(
+            'Debug service listening on ws://127.0.0.1:8181/integ_tok/ws\n');
+      });
+      final _FakeProcess fakeProcess =
+          _FakeProcess.withPidLine(pidLine: '5555', pid: 1);
 
       final StartCommand startCmd = StartCommand(
         processStart: (String exe, List<String> args,
@@ -374,6 +382,22 @@ void main() {
 /// Fake [Process] used by [StartCommand] in integration tests.
 class _FakeProcess implements Process {
   _FakeProcess._(this._stdoutController, this.pid);
+
+  factory _FakeProcess.withPidLine({
+    required String pidLine,
+    required int pid,
+  }) {
+    // onListen pattern: hand off the bytes when (not before) the subscriber
+    // arrives. Prevents broadcast-style drop-with-no-listener flakes in
+    // long-running test suites.
+    final List<int> bytes = utf8.encode('$pidLine\n');
+    final StreamController<List<int>> controller =
+        StreamController<List<int>>();
+    controller.onListen = () {
+      controller.add(bytes);
+    };
+    return _FakeProcess._(controller, pid);
+  }
 
   factory _FakeProcess.withUriLine(String line, {required int pid}) {
     final StreamController<List<int>> controller =
