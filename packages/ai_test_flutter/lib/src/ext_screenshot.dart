@@ -7,6 +7,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:image/image.dart' as img_lib;
 
+import 'ref_registry.dart';
+
 import 'v3_plugin.dart';
 import 'v3_register.dart';
 
@@ -55,45 +57,49 @@ Future<developer.ServiceExtensionResponse> _screenshotHandler(
 
     // 2. Rasterise the current frame at 2× device pixels for retina fidelity.
     //    toImage() asserts !debugNeedsPaint — called only after a paint phase.
+    //    Wrapped in try/finally so any encode failure still disposes the GPU
+    //    handle (Plan Step 11 Must NOT: skip img.dispose).
     final ui.Image img = await boundary.toImage(pixelRatio: 2.0);
     final int width = img.width;
     final int height = img.height;
 
-    // 3. Encode to the requested format and base64-encode the byte stream.
     final String base64Payload;
-    if (format == 'png') {
-      // 3a. PNG path: lossless, larger payload (~300-800 KB for a full HD
-      //     screen at 2x). Use only when pixel-exact output is required.
-      final ByteData? byteData =
-          await img.toByteData(format: ui.ImageByteFormat.png);
-      img.dispose();
+    try {
+      // 3. Encode to the requested format and base64-encode the byte stream.
+      if (format == 'png') {
+        // 3a. PNG path: lossless, larger payload (~300-800 KB for a full HD
+        //     screen at 2x). Use only when pixel-exact output is required.
+        final ByteData? byteData =
+            await img.toByteData(format: ui.ImageByteFormat.png);
 
-      if (byteData == null) {
-        return developer.ServiceExtensionResponse.error(
-          developer.ServiceExtensionResponse.extensionError,
-          'toByteData returned null for PNG format',
-        );
+        if (byteData == null) {
+          return developer.ServiceExtensionResponse.error(
+            developer.ServiceExtensionResponse.extensionError,
+            'toByteData returned null for PNG format',
+          );
+        }
+
+        base64Payload = base64Encode(byteData.buffer.asUint8List());
+      } else {
+        // 3b. JPEG path (default): lossy q70 encode via the `image` package.
+        //     Steps: toImage() → PNG bytes → decodePng → encodeJpg. This keeps
+        //     payloads in the 40-120 KB range for typical app screens.
+        final ByteData? pngByteData =
+            await img.toByteData(format: ui.ImageByteFormat.png);
+
+        if (pngByteData == null) {
+          return developer.ServiceExtensionResponse.error(
+            developer.ServiceExtensionResponse.extensionError,
+            'toByteData returned null for intermediate PNG (JPEG path)',
+          );
+        }
+
+        final Uint8List pngBytes = pngByteData.buffer.asUint8List();
+        final Uint8List jpegBytes = encodeToJpeg(pngBytes, quality: quality);
+        base64Payload = base64Encode(jpegBytes);
       }
-
-      base64Payload = base64Encode(byteData.buffer.asUint8List());
-    } else {
-      // 3b. JPEG path (default): lossy q70 encode via the `image` package.
-      //     Steps: toImage() → PNG bytes → decodePng → encodeJpg. This keeps
-      //     payloads in the 40-120 KB range for typical app screens.
-      final ByteData? pngByteData =
-          await img.toByteData(format: ui.ImageByteFormat.png);
+    } finally {
       img.dispose();
-
-      if (pngByteData == null) {
-        return developer.ServiceExtensionResponse.error(
-          developer.ServiceExtensionResponse.extensionError,
-          'toByteData returned null for intermediate PNG (JPEG path)',
-        );
-      }
-
-      final Uint8List pngBytes = pngByteData.buffer.asUint8List();
-      final Uint8List jpegBytes = encodeToJpeg(pngBytes, quality: quality);
-      base64Payload = base64Encode(jpegBytes);
     }
 
     // 4. Return the payload with format, encoded bytes, and dimensions.
@@ -119,21 +125,48 @@ Future<developer.ServiceExtensionResponse> _screenshotHandler(
 
 /// Resolves the [RenderRepaintBoundary] to capture.
 ///
-/// When [ref] is non-null and non-empty this function logs a warning and falls
-/// back to [AiTestPluginV3.rootRepaintBoundaryKey] — full Semantics-node-id to
-/// RenderObject mapping lands in the snapshot extension (Step 6) and will wire
-/// ref-based boundary resolution at that point.
+/// When [ref] is non-null and non-empty: looks up the RenderObject via
+/// [RefRegistry.lookup(ref).renderObject], walks ancestors for the nearest
+/// [RenderRepaintBoundary] (the RenderObject itself, if a RepaintBoundary
+/// was authored around the widget, otherwise its first such ancestor).
+/// Throws [StateError] when ref unknown OR no RepaintBoundary ancestor is
+/// reachable from the resolved RenderObject.
+///
+/// When [ref] is null/empty: falls back to
+/// [AiTestPluginV3.rootRepaintBoundaryKey] — the app-root boundary main.dart
+/// wraps under the `kIsWeb && kDebugMode` gate.
 ///
 /// Throws [StateError] when the root boundary is unavailable (plugin not
 /// installed or main.dart not wrapped with [RepaintBoundary]).
 RenderRepaintBoundary _resolveBoundary(String? ref) {
   if (ref != null && ref.isNotEmpty) {
-    // Full ref → element lookup lands in Step 6 (snapshot). Until then, log
-    // and fall through to the root boundary so whole-screen captures work.
-    developer.log(
-      '[ai-test-v3] screenshot: ref="$ref" lookup not yet implemented; '
-      'falling back to root boundary',
-      name: 'ai-test',
+    final RefEntry? entry = RefRegistry.lookup(ref);
+    if (entry == null) {
+      throw StateError(
+        'ext.aitest.screenshot: ref "$ref" not found in RefRegistry. '
+        'Call ext.aitest.snapshot first to register refs, or omit ref to '
+        'capture the root boundary.',
+      );
+    }
+    final RenderObject? renderObject = entry.renderObject;
+    if (renderObject == null) {
+      throw StateError(
+        'ext.aitest.screenshot: ref "$ref" resolved to a RefEntry with no '
+        'renderObject. Snapshot did not capture this node from the render '
+        'tree.',
+      );
+    }
+    RenderObject? cursor = renderObject;
+    while (cursor != null && cursor is! RenderRepaintBoundary) {
+      cursor = cursor.parent;
+    }
+    if (cursor is RenderRepaintBoundary) {
+      return cursor;
+    }
+    throw StateError(
+      'ext.aitest.screenshot: ref "$ref" has no RenderRepaintBoundary '
+      'ancestor. Wrap the target widget in `RepaintBoundary(...)` to enable '
+      'per-ref screenshots, or omit ref for the root capture.',
     );
   }
 
