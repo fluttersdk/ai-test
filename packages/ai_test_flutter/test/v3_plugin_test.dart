@@ -36,6 +36,42 @@ void main() {
   });
 
   group('AiTestPluginV3', () {
+    test(
+      'A3: install() skips all setup when aiTestDisableEnvValue is truthy',
+      () {
+        // Reset install state so the A3 guard is what fires, not the A2 guard.
+        // We do this by directly overriding the testable env-value hook, then
+        // reading installCount before and after to verify no increment beyond
+        // the guard path.
+        //
+        // Because String.fromEnvironment() is baked at compile time and cannot
+        // be overridden at runtime, AiTestPluginV3 exposes a
+        // @visibleForTesting static `aiTestDisableEnvValue` that defaults to
+        // String.fromEnvironment('AI_TEST_DISABLE', ...) but can be overridden
+        // in tests.
+        AiTestPluginV3.aiTestDisableEnvValue = '1';
+
+        // Capture baseline count. In Chrome-runner tests the isolate is shared
+        // across the group, so count may already be >0 from earlier tests.
+        final int countBefore = AiTestPluginV3.installCount;
+
+        // install() must return without performing full setup.
+        expect(AiTestPluginV3.install, returnsNormally);
+
+        // installCount must NOT have changed — the A3 guard fires before the
+        // A2 counter increment, so a disabled install is a no-op on the count.
+        expect(
+          AiTestPluginV3.installCount,
+          equals(countBefore),
+          reason: 'A3 guard must return before modifying installCount.',
+        );
+
+        // Restore the env override so subsequent tests are unaffected.
+        AiTestPluginV3.aiTestDisableEnvValue =
+            const String.fromEnvironment('AI_TEST_DISABLE', defaultValue: '');
+      },
+    );
+
     test('install() is idempotent (calling twice does not throw)', () {
       // First call: must succeed and perform setup.
       AiTestPluginV3.install();

@@ -65,6 +65,32 @@ await client.callTool({
 
 Form data lives in the snapshot YAML's `magicFormField:` enrichment per ref.
 
+## Disabling the plugin
+
+To prevent `AiTestPluginV3.install()` from registering any extensions without
+removing the call from `main.dart`, pass `--dart-define=AI_TEST_DISABLE=1` at
+build or run time:
+
+```bash
+flutter run -d chrome --dart-define=AI_TEST_DISABLE=1
+flutter build web --dart-define=AI_TEST_DISABLE=1
+```
+
+Accepted truthy values (case-insensitive): `1`, `true`, `yes`.
+
+`String.fromEnvironment` is used internally (not `Platform.environment`)
+because web targets have no `Platform.environment`. The value is baked into the
+compiled binary at build time; changing it requires a rebuild.
+
+The `kIsWeb && kDebugMode` outer gate in `main.dart` is still the primary
+tree-shaking guard for release builds. `AI_TEST_DISABLE` is a secondary runtime
+guard for debug/staging builds where the outer gate passes but the agent
+instrumentation should not activate (e.g. CI preview builds, automated UI
+regression runs that do not use the MCP server).
+
+> The `AiTestPluginV3.install()` line in `main.dart` must remain present.
+> The guard fires inside `install()`, not at the call site.
+
 ## References
 
 - Architecture deep-dive: [V3_OVERVIEW.md](V3_OVERVIEW.md)

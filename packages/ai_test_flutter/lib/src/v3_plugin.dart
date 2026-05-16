@@ -87,15 +87,42 @@ class AiTestPluginV3 {
   /// extension and wires the auto-collecting helpers (Dio interceptor + log
   /// sink land in Step 5).
   ///
-  /// Guarded by [_installCount]: the first call performs full setup; subsequent
-  /// calls within the same isolate lifetime log a skip message and return early.
-  /// This prevents duplicate [_pumpInterceptorRegistration] Timer-backoff loops
-  /// that would race each other on hot-restart scenarios where [install] is
-  /// invoked more than once before the isolate tears down.
+  /// Guarded by two early-return checks (in order):
+  ///
+  /// 1. **A3 env-var kill-switch** — reads [aiTestDisableEnvValue], which
+  ///    defaults to `String.fromEnvironment('AI_TEST_DISABLE', defaultValue:
+  ///    '')`. When non-empty AND truthy (`'1'`, `'true'`, `'yes'`, any case),
+  ///    the method logs a skip message and returns immediately without
+  ///    registering anything. Pass `--dart-define=AI_TEST_DISABLE=1` at build
+  ///    time to activate. Note: `String.fromEnvironment` is a compile-time
+  ///    constant; web targets have no `Platform.environment`, so
+  ///    `--dart-define` is the correct mechanism.
+  ///
+  /// 2. **A2 idempotency guard** — [_installCount] counter prevents duplicate
+  ///    [_pumpInterceptorRegistration] Timer-backoff loops on hot-restart.
   ///
   /// Logs `[ai-test-v3] installed (kDebugMode=$kDebugMode, isWeb=$kIsWeb)` on
-  /// the first call so devtools captures the activation timeline.
+  /// the first successful call so devtools captures the activation timeline.
   static void install() {
+    // A3 guard: compile-time env-var kill-switch. String.fromEnvironment is
+    // used (not Platform.environment) because web targets have no
+    // Platform.environment. --dart-define=AI_TEST_DISABLE=1 bakes the value
+    // at build time; it reads as a literal string at runtime.
+    //
+    // aiTestDisableEnvValue is exposed as @visibleForTesting so tests can
+    // override it without recompiling with --dart-define.
+    final String disableValue = aiTestDisableEnvValue.toLowerCase().trim();
+    if (disableValue == '1' ||
+        disableValue == 'true' ||
+        disableValue == 'yes') {
+      developer.log(
+        '[ai-test-v3] install() skipped — '
+        'AI_TEST_DISABLE=$aiTestDisableEnvValue set.',
+        name: 'ai-test',
+      );
+      return;
+    }
+
     // A2 guard: per-extension registerExtensionIdempotent calls AND the
     // _semanticsHandle ??= null-guard below are already idempotent. The actual
     // risk this guard addresses is _pumpInterceptorRegistration(): on
@@ -166,6 +193,20 @@ class AiTestPluginV3 {
   /// [_pumpInterceptorRegistration] scheduling.
   @visibleForTesting
   static int get installCount => _installCount;
+
+  /// The value read by the A3 env-var kill-switch inside [install].
+  ///
+  /// Defaults to `String.fromEnvironment('AI_TEST_DISABLE', defaultValue: '')`
+  /// which is baked at compile time via `--dart-define=AI_TEST_DISABLE=1`.
+  /// Exposed as a mutable static so tests can override it without recompiling
+  /// with a `--dart-define` flag (runtime `String.fromEnvironment` always
+  /// returns the compile-time constant; there is no other way to inject the
+  /// value in tests).
+  @visibleForTesting
+  static String aiTestDisableEnvValue = const String.fromEnvironment(
+    'AI_TEST_DISABLE',
+    defaultValue: '',
+  );
 
   /// Retained Semantics handle so the engine keeps building the accessibility
   /// tree for the lifetime of the plugin (the snapshot extension walks it).
