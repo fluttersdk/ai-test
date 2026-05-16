@@ -1,11 +1,14 @@
 name: ai_test_flutter
-description: Flutter Web E2E testing via Shadow DOM Projection. Spike package under active validation.
+description: Flutter Web LLM-agent test plugin (V3 — MCP-only single-channel via VM Service custom extensions).
 version: 0.0.1-dev
 publish_to: none
 
 environment:
   sdk: "^3.6.0"
   flutter: ">=3.27.0"
+
+executables:
+  ai_test_flutter: ai_test_flutter
 
 dependencies:
   flutter:
@@ -15,6 +18,7 @@ dependencies:
   magic: ^1.0.0-alpha.12
   logging: ^1.2.0
   image: ^4.0.0
+  args: ^2.5.0
 
 dev_dependencies:
   flutter_test:
