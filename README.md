@@ -1,85 +1,74 @@
-# ai-test — Flutter Web LLM-Agent Control
+# ai-test — Flutter Web LLM-Agent Control (V3)
 
-Two packages bridge a running Flutter web app to an LLM coding agent (Claude / Cursor / similar) so the agent can drive, inspect, and verify the app via Playwright.
+> MCP-only single-channel via Dart VM Service custom extensions. No Playwright, no DOM mirror, no Shadow DOM projection.
+
+Two packages bridge a running Flutter web app to an LLM coding agent (Claude / Cursor / similar) so the agent can drive, inspect, and verify the app A-Z over a single MCP stdio surface.
 
 | Package | Path | Role |
 |---|---|---|
-| `ai_test_flutter` | `packages/ai_test_flutter/` | Tiny Dart plugin: enables Flutter Semantics tree, exposes `window.__aiTestReady`, registers `ext.aitest.getRoutes` VM Service extension |
-| `ai_test_node` | `packages/ai_test_node/` | TypeScript MCP server bridging an LLM agent to the Dart VM Service (3 tools: `get_widget_tree`, `evaluate_dart`, `get_routes`) |
+| `ai_test_flutter` | `packages/ai_test_flutter/` | Flutter Dart plugin: `AiTestPluginV3.install()` registers ~18 `ext.aitest.*` VM Service custom extensions (snapshot/tap/type/scroll/screenshot/network/etc.) plus a Dart `bin/` CLI for lifecycle management. |
+| `ai_test_node` | `packages/ai_test_node/` | TypeScript MCP server. 19 tools wrap the Dart-side extensions over a single VM Service WebSocket. |
 
-## V2 Architecture: Hybrid B+C
+## V3 Architecture
 
-Native Flutter Semantics tree (primary selector surface for Playwright) + VM Service Inspector Protocol (fallback for state inspection beyond what Semantics surfaces).
+```
+agent (LLM, IDE)
+  │
+  ▼  MCP stdio
+ai-test-mcp (TypeScript)
+  │
+  ▼  Dart VM Service Protocol (one WebSocket)
+flutter run -d chrome --no-dds --dart-define=AI_TEST=1
+  │
+  ▼  developer.registerExtension dispatch
+ai_test_flutter (Dart) ext.aitest.*
+  │
+  ▼  WidgetsBinding / Element walk / RenderRepaintBoundary / ...
+running widget tree
+```
 
-**Why Hybrid B+C:**
-- Semantics is Flutter's source-of-truth for "what does this widget mean"; covers Material primitives + the in-house Wind framework's interactive widgets (`WAnchor`, `WButton`, `WInput`, `WFormInput`, `WCheckbox`, `WSelect`, `WDatePicker`).
-- After Flutter PR #39688 (Mar 2023) `flt-semantics` lives in plain LIGHT DOM, so Playwright's `getByRole`, `getByLabel`, `getByText` resolve without shadow piercing.
-- VM Service exposes the structured widget tree + arbitrary Dart `evaluate` for the cases Semantics cannot reach (controller state, MagicFormData values, route snapshots).
-
-V0 used a parallel `<div>` mirror DOM projection; V1 hardened it; V2 abandoned the parallel-tree approach in favor of Flutter native Semantics + VM Service. Forensics: `V1_RESULT.md`.
+V0 / V1 / V2 attempted Shadow DOM projection / mirror DOM / native Semantics + Playwright. V2 dual-chrome split + DOM input race were the V2 mission failure. V3 collapses everything into one channel; Playwright eliminated.
 
 ## Launch
 
-From the consumer Flutter app's repo:
+From the consumer Flutter app's repo (e.g. `uptizm-app/`):
 
-```sh
-scripts/dev-with-aitest.sh
+```bash
+# Wire-once in lib/main.dart inside `if (kIsWeb && kDebugMode)`:
+AiTestPluginV3.install();
+runApp(
+  RepaintBoundary(
+    key: AiTestPluginV3.rootRepaintBoundaryKey,
+    child: yourApp,
+  ),
+);
+
+# Then launch via the CLI:
+dart run ai_test_flutter:ai_test_flutter start    # boots flutter run -d chrome + writes ~/.ai-test/state.json
+dart run ai_test_flutter:ai_test_flutter status   # JSON status
+dart run ai_test_flutter:ai_test_flutter doctor   # environment preflight
+dart run ai_test_flutter:ai_test_flutter stop     # SIGTERM + state.json delete
 ```
 
-Boots Flutter web on `http://127.0.0.1:3100` with VM Service WebSocket exposed at `ws://127.0.0.1:8181/ws` (auth disabled for local dev). The plugin's `RendererBinding.instance.ensureSemantics()` runs inside a `kIsWeb && kDebugMode + AI_TEST=1` gate; production builds tree-shake the entire branch out.
+The compile-time `kIsWeb && kDebugMode` outer guard lets dart2js prove the entire branch dead in release; production builds emit zero V3 bytes.
 
-## How an LLM agent drives the app
+## State inspection
 
-Two surfaces, used together:
+Replaces V2's typed `inspect_state` per Oracle cull (dart2js has no reflection so a typed wrapper would be a fake hint):
 
-### 1. Playwright (browser-side)
-
-Helpers in `references/playwright-cli/tests/_helpers.ts`:
-
-| Helper | Purpose |
-|---|---|
-| `loginViaSemantics(page, { email, password })` | Navigate, wait for ready, fill email + password by aria-label / placeholder, click sign-in by role |
-| `clickByName(page, name, role?)` | `page.getByRole(role ?? 'button', { name }).click()` with coordinate fallback |
-| `fillByLabel(page, label, value)` | `page.getByLabel(label).fill(value)` |
-| `waitForFlutterReady(page)` | Wait for `flt-glass-pane` + 800ms CanvasKit init + `window.__aiTestReady === true` |
-| `clickByCoordinate(page, locator)` | Escape-hatch when target widget does NOT emit Semantics (raw `CustomPainter` / bare `GestureDetector`) |
-
-### 2. MCP server (state-inspection surface)
-
-`packages/ai_test_node/` exposes 3 tools over stdio:
-
-| Tool | Calls | Purpose |
-|---|---|---|
-| `get_widget_tree` | `ext.flutter.inspector.getRootWidgetTree` | Structured widget tree as JSON; agent discovers what's on screen |
-| `evaluate_dart` | VM Service `evaluate` against `main.dart` rootLib | Run arbitrary Dart expressions like `Magic.find<MonitorController>().rxState.value`, `MagicRoute.currentLocation` |
-| `get_routes` | `ext.aitest.getRoutes` | Current GoRouter location + page title |
-
-MCP config snippet for Claude Desktop / Cursor:
-
-```json
-{
-  "mcpServers": {
-    "ai-test": {
-      "command": "npx",
-      "args": ["tsx", "<abs path>/references/ai-test/packages/ai_test_node/src/index.ts"],
-      "env": { "AI_TEST_VM_SERVICE_URI": "ws://127.0.0.1:8181/ws" }
-    }
-  }
-}
+```typescript
+await client.callTool({
+  name: 'flutter_evaluate',
+  arguments: { expression: 'Magic.find<MonitorController>().rxState.value.toString()' },
+});
 ```
 
-## End-to-end agent walkthrough
+Form data lives in the snapshot YAML's `magicFormField:` enrichment per ref.
 
-Canonical example: `references/playwright-cli/tests/uptizm-agent-walkthrough.spec.ts`. The spec demonstrates the full flow:
+## References
 
-1. `loginViaSemantics` (Playwright + Wind Semantics)
-2. Navigate to a route, `waitForFlutterReady`
-3. MCP `get_widget_tree` to discover what's there
-4. MCP `get_routes` to verify navigation
-5. `clickByName` (Playwright + Semantics role match)
-6. MCP `evaluate_dart` to inspect controller / route state
-7. Re-check route to confirm side-effects
-
-## V1 forensics
-
-V1 (Shadow DOM Projection) results: `V1_RESULT.md`. Verdict: NEEDS_WORK / lean ABANDON for the diff approach; recommended pivot to Hybrid B+C, which is V2.
+- Architecture deep-dive: [V3_OVERVIEW.md](V3_OVERVIEW.md)
+- V1 forensics: [V1_RESULT.md](V1_RESULT.md)
+- Plan: `.ac/plans/ai-test-v3/plan.md` (28 steps, 9 waves)
+- Wave 1 spike: `.ac/plans/ai-test-v3/evidence/wave-1-spike.md`
+- Walkthrough: `.ac/plans/ai-test-v3/evidence/walkthrough.ts` + readme
