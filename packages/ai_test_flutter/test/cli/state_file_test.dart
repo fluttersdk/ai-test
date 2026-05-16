@@ -129,6 +129,69 @@ void main() {
     });
   });
 
+  group('StateFile D6 schema extensions (chromePid + tmpProfileDir)', () {
+    test('round-trips both new fields when present', () async {
+      final Map<String, dynamic> state = <String, dynamic>{
+        'pid': 12345,
+        'vmServiceUri': 'ws://127.0.0.1:8181/token/ws',
+        'webPort': 3100,
+        'vmServicePort': 8181,
+        'startedAt': '2026-05-16T10:00:00.000Z',
+        'profile': 'debug',
+        'projectRoot': '/path/to/project',
+        'chromePid': 67890,
+        'tmpProfileDir': '/var/folders/x/y/T/flutter_tools.abc/'
+            'flutter_tools_chrome_device.def',
+      };
+
+      await StateFile.write(state);
+
+      final Map<String, dynamic> decoded = (await StateFile.read())!;
+      expect(decoded['chromePid'], equals(67890));
+      expect(
+          decoded['tmpProfileDir'],
+          equals('/var/folders/x/y/T/flutter_tools.abc/'
+              'flutter_tools_chrome_device.def'));
+    });
+
+    test('serializes null values as JSON null and reads them back as null',
+        () async {
+      await StateFile.write(<String, dynamic>{
+        'pid': 1,
+        'chromePid': null,
+        'tmpProfileDir': null,
+      });
+
+      final Map<String, dynamic> decoded = (await StateFile.read())!;
+      expect(decoded.containsKey('chromePid'), isTrue,
+          reason: 'null fields stay in the JSON so consumers can distinguish '
+              '"capture failed" from "legacy state"');
+      expect(decoded['chromePid'], isNull);
+      expect(decoded['tmpProfileDir'], isNull);
+    });
+
+    test(
+        'legacy state.json (without chromePid/tmpProfileDir) reads back with '
+        'null defaults', () async {
+      // Simulate a pre-D6 state.json by writing only the legacy keys.
+      await StateFile.write(<String, dynamic>{
+        'pid': 9999,
+        'vmServiceUri': 'ws://127.0.0.1:8181/legacy/ws',
+        'webPort': 3100,
+        'vmServicePort': 8181,
+        'startedAt': '2026-01-01T00:00:00.000Z',
+        'profile': 'debug',
+        'projectRoot': '/legacy/project',
+      });
+
+      final Map<String, dynamic> state = (await StateFile.read())!;
+      expect(state['pid'], equals(9999));
+      // Backward compat: missing keys read as null without throw.
+      expect(state['chromePid'], isNull);
+      expect(state['tmpProfileDir'], isNull);
+    });
+  });
+
   group('StateFile.delete', () {
     test('removes state.json when present', () async {
       await StateFile.write(<String, dynamic>{'pid': 1});

@@ -324,10 +324,25 @@ void main() {
       final _FakeProcess fakeProcess =
           _FakeProcess.withPidLine(pidLine: '5555', pid: 1);
 
+      // D6 seams: noop processRun + empty tmp root + zero capture delay so the
+      // legacy integration test does not invoke the real `pgrep -fl` against
+      // the developer's machine.
+      final Directory emptyTmpRoot =
+          Directory.systemTemp.createTempSync('ai_test_tmproot_');
+      addTearDown(() {
+        if (emptyTmpRoot.existsSync()) {
+          emptyTmpRoot.deleteSync(recursive: true);
+        }
+      });
       final StartCommand startCmd = StartCommand(
         processStart: (String exe, List<String> args,
                 {ProcessStartMode mode = ProcessStartMode.normal}) async =>
             fakeProcess,
+        processRun: (String exe, List<String> args,
+                {bool runInShell = false}) async =>
+            ProcessResult(0, 1, '', ''),
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
       );
 
       final CommandRunner<void> runner =
@@ -362,6 +377,8 @@ void main() {
           killed.add(pid);
           return true;
         },
+        isAlive: (int pid) => false,
+        postSigtermDelay: Duration.zero,
       );
 
       final CommandRunner<void> runner3 =
