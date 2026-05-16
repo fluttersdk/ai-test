@@ -1,95 +1,61 @@
-import 'dart:convert';
-import 'dart:developer' as developer;
+import 'ext_mock_http.dart';
+import 'ext_navigation.dart';
+import 'ext_network_console.dart';
+import 'ext_pointer.dart';
+import 'ext_screenshot.dart';
+import 'ext_scroll.dart';
+import 'ext_snapshot.dart';
+import 'ext_text_input.dart';
+import 'ext_wait_find.dart';
 
-import 'package:flutter/foundation.dart';
-import 'package:magic/magic.dart';
+/// Registers every `ext.aitest.*` extension owned by the V3 ai_test plugin.
+///
+/// This aggregator is called once from [AiTestPluginV3.install] during app
+/// initialization. It coordinates the self-registering Wave 3 extension modules
+/// in a single entry point, ensuring idempotency via each module's own calls to
+/// [registerExtensionIdempotent].
+///
+/// Each call is sequential but idempotent (safe to call multiple times during
+/// hot-restart). The registration order does not affect functionality, but we
+/// keep a stable order for readability.
+void registerAllAiTestExtensions() {
+  // 1. Snapshot: Semantics tree walk + ref system + field enrichment.
+  registerSnapshotExtension();
 
-/// Tracks whether extensions have been registered to prevent double-registration
-/// on hot-reload.
-bool _registered = false;
+  // 2. Pointer: tap + hover + drag handlers.
+  registerPointerExtensions();
 
-/// Builds the response JSON for the `ext.aitest.getRoutes` extension.
-///
-/// This is extracted as a separate function for testability.
-///
-/// Returns a map with:
-/// - `location`: current GoRouter location (via MagicRouter)
-/// - `title`: current page title (via MagicRoute facade)
-///
-/// Throws on any error accessing routing state.
-@visibleForTesting
-Map<String, dynamic> buildGetRoutesResponse() => <String, dynamic>{
-      'location': MagicRouter.instance.currentLocation ?? '',
-      'title': MagicRoute.currentTitle ?? '',
-    };
+  // 3. Text input: type + press_key handlers.
+  registerTextInputExtensions();
 
-/// Handler for the `ext.aitest.getRoutes` VM Service extension.
-///
-/// Returns the current GoRouter location and page title as JSON:
-/// `{ "location": "/current/path", "title": "Page Title" }`.
-///
-/// Must be a top-level function to be callable as a Dart VM Service RPC handler.
-Future<developer.ServiceExtensionResponse> aiTestGetRoutesHandler(
-  String method,
-  Map<String, String> params,
-) async {
-  try {
-    final response = buildGetRoutesResponse();
+  // 4. Scroll: scroll + select_option handlers.
+  registerScrollExtensions();
 
-    return developer.ServiceExtensionResponse.result(
-      jsonEncode(response),
-    );
-  } catch (e) {
-    return developer.ServiceExtensionResponse.error(
-      developer.ServiceExtensionResponse.extensionError,
-      e.toString(),
-    );
-  }
+  // 5. Navigation: navigate + navigate_back + get_routes handlers.
+  registerNavigationExtensions();
+
+  // 6. Screenshot: RepaintBoundary.toImage → JPEG/PNG.
+  registerScreenshotExtension();
+
+  // 7. Network console: read Dio ring buffer.
+  registerNetworkConsoleExtensions();
+
+  // 8. Mock HTTP: inject fake Dio responses.
+  registerMockHttpExtension();
+
+  // 9. Wait + find: wait_for + find_by_text + find_by_label.
+  registerWaitFindExtensions();
 }
 
-/// Registers the `ext.aitest.getRoutes` VM Service extension.
+/// Resets any extension state for testing.
 ///
-/// This function must be called during app initialization when debug mode
-/// is active. It is a no-op in release mode (gated by [kDebugMode]).
+/// Most Wave 3 modules are stateless (they read runtime state from the running
+/// app). This function is a hook for future modules that accumulate state
+/// (e.g., caches, collected data). Currently it defers to the individual
+/// modules' own reset strategies if they exist.
 ///
-/// Idempotent: calls after the first one are silently ignored to prevent
-/// double-registration on hot-reload.
-///
-/// The registered extension is callable by VM Service clients (e.g., DevTools,
-/// ai_test_node MCP server) via JSON-RPC:
-///
-/// ```json
-/// {
-///   "jsonrpc": "2.0",
-///   "method": "ext.aitest.getRoutes",
-///   "params": {},
-///   "id": 1
-/// }
-/// ```
-///
-/// Response (success):
-/// ```json
-/// {
-///   "location": "/auth/login",
-///   "title": "Login"
-/// }
-/// ```
-void registerAiTestExtensions() {
-  // Gate: only register in debug mode. Release builds tree-shake this call.
-  if (!kDebugMode) {
-    return;
-  }
-
-  // Idempotent: prevent double-registration on hot-reload.
-  if (_registered) {
-    return;
-  }
-
-  _registered = true;
-
-  // Register the `ext.aitest.getRoutes` extension.
-  developer.registerExtension(
-    'ext.aitest.getRoutes',
-    aiTestGetRoutesHandler,
-  );
+/// Called from test setup or reset scenarios.
+void resetForTesting() {
+  // Placeholder: individual modules defer their reset logic.
+  // No global state to clear at the aggregator level.
 }

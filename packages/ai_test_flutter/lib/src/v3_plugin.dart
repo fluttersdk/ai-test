@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 
 import 'ai_test_http_interceptor.dart';
 import 'ai_test_log_sink.dart';
+import 'extensions.dart';
 import 'v3_register.dart';
 
 /// Entry point for the V3 ai_test_flutter plugin.
@@ -99,24 +100,4 @@ class AiTestPluginV3 {
       name: 'ai-test',
     );
   }
-}
-
-// -----------------------------------------------------------------------------
-// Wave 3 aggregator — STUB.
-// -----------------------------------------------------------------------------
-
-/// Registers every `ext.aitest.*` extension owned by the V3 plugin.
-///
-/// **Stub for Wave 2 → Wave 3 hand-off.** Step 14b (Wave 3 aggregator) lands
-/// the real implementation: one `register<X>Extensions()` call per ext_*
-/// module (snapshot, pointer, text_input, scroll, navigation, screenshot,
-/// network_console, mock_http, wait_find). Until then this stub keeps
-/// [AiTestPluginV3.install] compiling standalone so Wave 2 ships green
-/// without depending on Wave 3 modules.
-///
-/// Step 14b moves this function body into a fresh `extensions.dart` REWRITE
-/// (per Wave 3 plan note) and removes this stub. The signature stays the
-/// same, so [AiTestPluginV3.install] does not need to change.
-void registerAllAiTestExtensions() {
-  // Intentional no-op. Wave 3 fills this in.
 }
