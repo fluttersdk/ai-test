@@ -62,9 +62,13 @@ class StartCommand extends Command<void> {
       )
       ..addFlag(
         'dds',
-        defaultsTo: true,
+        defaultsTo: false,
         negatable: true,
-        help: 'Pass --no-dds when disabled (default: on, i.e. DDS off).',
+        help: 'Enable Dart DevTools Service (DDS). Default off — Wave 1 '
+            'spike confirmed bare-name ext.aitest.* calls work on Flutter '
+            '3.41+ without DDS, and --no-dds reduces one connection hop. '
+            'Pass --dds to opt back into DDS (useful when sharing a session '
+            'with Flutter DevTools).',
       )
       ..addFlag(
         'profile-static',
@@ -109,7 +113,7 @@ class StartCommand extends Command<void> {
       '-d',
       'chrome',
       '--web-port=$webPort',
-      if (!ddsOn) '--no-dds' else '--no-dds',
+      if (!ddsOn) '--no-dds',
       '--dart-define=AI_TEST=1',
     ];
 
