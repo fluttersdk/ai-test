@@ -115,17 +115,46 @@ Future<void> typeIntoElement({
   // 2. Focus the field so the engine IME state is coherent after mutation.
   state.requestKeyboard();
 
-  // 3. Primary path — set the controller value directly.
-  //    Confirmed by wave-1-spike (Path A LOCKED): controller.value mutation
-  //    propagates to ValueListenableBuilder listeners in the next frame.
-  final TextEditingController? controller = _extractController(state);
+  // 3. Primary path — emulate user input via Flutter's official user-input
+  //    API. `userUpdateTextEditingValue` updates the controller AND fires the
+  //    EditableText.onChanged / TextField.onChanged listeners, which is the
+  //    path Wind WFormInput (and any parent in controlled-via-onChanged
+  //    pattern) depends on. Naive `controller.value = ...` setter only
+  //    notifies ValueListenable subscribers — Wind's parent onChanged stays
+  //    silent and form-data backing controllers receive the empty initial
+  //    value, causing 422 "required" validation failures on submit.
+  //
+  //    Source: EditableTextState.userUpdateTextEditingValue is the canonical
+  //    pathway TextField + EditableText invoke when the user types a key.
+  final TextEditingValue newValue = TextEditingValue(
+    text: text,
+    selection: TextSelection.collapsed(offset: text.length),
+  );
 
-  if (controller != null) {
-    controller.value = TextEditingValue(
-      text: text,
-      selection: TextSelection.collapsed(offset: text.length),
+  bool injected = false;
+  try {
+    state.userUpdateTextEditingValue(newValue, SelectionChangedCause.keyboard);
+    injected = true;
+  } catch (e) {
+    developer.log(
+      '[ai-test-v3] ext.aitest.type: userUpdateTextEditingValue threw $e; '
+      'falling back to controller.value setter',
+      name: 'ai-test',
     );
-  } else {
+  }
+
+  if (!injected) {
+    // 3b. Fallback when userUpdateTextEditingValue is unavailable (older
+    //     Flutter) — set the controller directly. May leave parent listeners
+    //     unfired; only used as a defensive last resort.
+    final TextEditingController? controller = _extractController(state);
+    if (controller != null) {
+      controller.value = newValue;
+      injected = true;
+    }
+  }
+
+  if (!injected) {
     // 4. Fallback path — platform message when controller is inaccessible.
     //    SystemChannels.textInput.setEditingState is a confirmed NO-OP outside
     //    test binding (Flutter #87990 / wave-1-spike finding 5). Instead, call
