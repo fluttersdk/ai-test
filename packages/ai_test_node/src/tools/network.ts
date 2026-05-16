@@ -133,7 +133,7 @@ function registerFlutterNetworkRequests(
                 'Return the list of HTTP requests the app has issued since boot. Wraps `ext.aitest.network_requests` reading the AiTestHttpInterceptor ring buffer (most recent 50).',
             inputSchema: {
                 limit: z
-                    .number()
+                    .coerce.number()
                     .int('limit must be an integer')
                     .positive('limit must be a positive integer')
                     .optional(),
@@ -186,7 +186,7 @@ function registerFlutterConsoleMessages(
                 'Return the list of console log entries the app has emitted since boot. Wraps `ext.aitest.console_messages` reading the AiTestLogSink ring buffer (most recent 100). Accepted level names: all, finest, finer, fine, config, info, warning, error, severe, shout.',
             inputSchema: {
                 limit: z
-                    .number()
+                    .coerce.number()
                     .int('limit must be an integer')
                     .positive('limit must be a positive integer')
                     .optional(),
@@ -243,7 +243,7 @@ function registerFlutterMockHttp(
                     .string()
                     .min(1, 'pattern must be a non-empty URL substring or regex'),
                 status: z
-                    .number()
+                    .coerce.number()
                     .int('status must be an integer HTTP status code')
                     .min(100, 'status must be a valid HTTP status code (>= 100)')
                     .max(599, 'status must be a valid HTTP status code (<= 599)'),
