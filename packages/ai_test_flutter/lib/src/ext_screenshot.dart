@@ -170,25 +170,50 @@ RenderRepaintBoundary _resolveBoundary(String? ref) {
     );
   }
 
-  final BuildContext? context =
+  // 1. Preferred path — use the GlobalKey when present (legacy V3.0 wrap).
+  //    Skipped silently when the key has no currentContext, which is the
+  //    new V3.1 default (main.dart no longer wraps with a GlobalKey to
+  //    avoid GlobalKey-vs-MagicApplication-rebuild lifecycle assertions).
+  final BuildContext? keyedCtx =
       AiTestPluginV3.rootRepaintBoundaryKey.currentContext;
-  if (context == null) {
+  if (keyedCtx != null) {
+    final RenderObject? ro = keyedCtx.findRenderObject();
+    if (ro is RenderRepaintBoundary) return ro;
+  }
+
+  // 2. Fallback — walk the render tree from the app root and return the
+  //    first RenderRepaintBoundary we find. Flutter's `RootWidget` /
+  //    `RenderView` chain wraps the entire layer tree in an implicit
+  //    repaint boundary on web, so this reliably resolves to a
+  //    capturable boundary without requiring a GlobalKey wrap.
+  final Element? rootEl = WidgetsBinding.instance.rootElement;
+  if (rootEl == null) {
     throw StateError(
-      'ext.aitest.screenshot: rootRepaintBoundaryKey has no currentContext. '
-      'Ensure AiTestPluginV3.install() was called and main.dart wraps the '
-      'app root in RepaintBoundary(key: AiTestPluginV3.rootRepaintBoundaryKey).',
+      'ext.aitest.screenshot: no root element — was AiTestPluginV3.install '
+      'called after runApp()?',
     );
   }
 
-  final RenderObject? renderObject = context.findRenderObject();
-  if (renderObject is! RenderRepaintBoundary) {
-    throw StateError(
-      'ext.aitest.screenshot: rootRepaintBoundaryKey is not backed by a '
-      'RenderRepaintBoundary. Found: ${renderObject.runtimeType}',
-    );
+  RenderRepaintBoundary? found;
+  void walk(RenderObject node) {
+    if (found != null) return;
+    if (node is RenderRepaintBoundary) {
+      found = node;
+      return;
+    }
+    node.visitChildren(walk);
   }
 
-  return renderObject;
+  final RenderObject? rootRO = rootEl.renderObject;
+  if (rootRO != null) walk(rootRO);
+
+  if (found != null) return found!;
+
+  throw StateError(
+    'ext.aitest.screenshot: no RenderRepaintBoundary found in the render '
+    'tree. Wrap the app root in `RepaintBoundary(...)` (no GlobalKey '
+    'required) to enable screenshots.',
+  );
 }
 
 /// Encodes PNG [bytes] to JPEG at the given [quality] using the `image`
