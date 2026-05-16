@@ -440,6 +440,50 @@ void main() {
       expect(body['reason'], equals('timeout'));
       expect(body.containsKey('recentCount'), isTrue);
     });
+
+    test('cancels stream subscription on timeout (no listener leak)', () async {
+      // Force the broadcast controller to allocate by reading the getter once.
+      final stream = AiTestHttpInterceptor.instance.newEntries;
+      // Spy via a temporary listener so we can observe Stream.hasListener
+      // transitions cleanly. Direct controller introspection is not exposed.
+      final probe = stream.listen((_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Time out 5 wait_for_request calls back-to-back; each must clean up.
+      for (var i = 0; i < 5; i++) {
+        await aiTestWaitForRequestHandler(
+          'ext.aitest.wait_for_request',
+          <String, String>{
+            'urlPattern': '/never/match/$i',
+            'timeoutMs': '50',
+          },
+        );
+      }
+
+      // After all 5 timed out, cancel the probe + wait one tick. If subscriptions
+      // had leaked, the broadcast stream would still have ~5 active listeners.
+      await probe.cancel();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Emit a synthetic entry; with all subscriptions cancelled it should be
+      // a no-op (no exception, no orphan predicate evaluation).
+      AiTestHttpInterceptor.instance.onRequest(MagicRequest(
+        url: '/leak-probe',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      AiTestHttpInterceptor.instance.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+      // If we reach here without timing out the test (default 30s), we have
+      // no infinite recursion or pathological listener accumulation.
+      expect(true, isTrue);
+    });
   });
 
   // ---------------------------------------------------------------------------

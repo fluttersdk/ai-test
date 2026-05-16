@@ -631,23 +631,39 @@ Future<developer.ServiceExtensionResponse> aiTestWaitForRequestHandler(
       }
     }
 
-    // 2. No buffered match — subscribe to the broadcast stream and wait for
-    //    the first new entry that satisfies the predicate. Stream.firstWhere
-    //    naturally cancels its subscription on match; the timeout closure
-    //    returns null which we distinguish from a real null entry (entries
-    //    are always non-null maps).
-    final Map<String, dynamic> match = await interceptor.newEntries
-        .firstWhere(
-          (entry) =>
-              _matchesRequest(entry, urlRe, methodFilter, minStatus, maxStatus),
-          orElse: () => const <String, dynamic>{'__sentinel__': true},
-        )
-        .timeout(
-          Duration(milliseconds: timeoutMs),
-          onTimeout: () => const <String, dynamic>{'__sentinel__': true},
-        );
+    // 2. No buffered match — subscribe to the broadcast stream with explicit
+    //    StreamSubscription + Completer + Timer. Stream.firstWhere combined
+    //    with Future.timeout LEAKS the inner subscription on timeout (the
+    //    outer Future.timeout completes but does not propagate cancel back
+    //    to firstWhere's stream listener), and over multi-hour LLM sessions
+    //    with many wait-for-request timeouts the broadcast controller
+    //    accumulates orphan listeners that re-run the predicate on every
+    //    subsequent entry. Manual subscription guarantees cleanup on both
+    //    paths (match or timeout). Oracle finding: production-readiness pass.
+    final Completer<Map<String, dynamic>?> completer =
+        Completer<Map<String, dynamic>?>();
+    late final StreamSubscription<Map<String, dynamic>> sub;
+    late final Timer timer;
 
-    if (match['__sentinel__'] == true) {
+    void finish(Map<String, dynamic>? value) {
+      if (completer.isCompleted) return;
+      sub.cancel();
+      timer.cancel();
+      completer.complete(value);
+    }
+
+    sub = interceptor.newEntries.listen((entry) {
+      if (_matchesRequest(entry, urlRe, methodFilter, minStatus, maxStatus)) {
+        finish(entry);
+      }
+    }, onError: (_) {
+      // Stream errors are non-fatal here; let the timeout decide.
+    });
+    timer = Timer(Duration(milliseconds: timeoutMs), () => finish(null));
+
+    final Map<String, dynamic>? match = await completer.future;
+
+    if (match == null) {
       return developer.ServiceExtensionResponse.result(
         jsonEncode(<String, dynamic>{
           'matched': false,
