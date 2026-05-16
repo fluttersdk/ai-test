@@ -1,10 +1,12 @@
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:ai_test_flutter/ai_test_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:magic/magic.dart';
 
 /// Tests for `ext.aitest.wait_for`, `ext.aitest.find_by_text`, and
 /// `ext.aitest.find_by_label` VM Service extensions (Step 14 of V3 plan).
@@ -323,6 +325,330 @@ void main() {
       // Second call must NOT throw — ArgumentError swallowed by
       // registerExtensionIdempotent.
       expect(registerWaitFindExtensions, returnsNormally);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ext.aitest.wait_for_request — pre-match (buffer already has the entry)
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.wait_for_request (pre-match)', () {
+    setUp(() {
+      AiTestHttpInterceptor.resetForTesting();
+    });
+
+    test(
+        'returns matched:true immediately when buffer already has matching entry',
+        () async {
+      // Pre-populate the buffer with a matching entry via a simulated lifecycle.
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/monitors/123/metrics',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': r'/monitors/\d+/metrics',
+          'timeoutMs': '1000',
+        },
+      );
+
+      expect(result.result, isNotNull);
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isTrue, reason: 'Buffer had matching entry');
+      expect(body['url'], contains('/monitors/'));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ext.aitest.wait_for_request — post-match (entry arrives via stream)
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.wait_for_request (post-match via stream)', () {
+    setUp(() {
+      AiTestHttpInterceptor.resetForTesting();
+    });
+
+    test('returns matched:true when entry is added to stream after call starts',
+        () async {
+      // Start the handler future — buffer is empty so it will subscribe.
+      final handlerFuture = aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': '/api/v1/status',
+          'timeoutMs': '3000',
+        },
+      );
+
+      // After a short delay, inject the matching entry into the interceptor,
+      // which fires the stream event.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/api/v1/status',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final result = await handlerFuture;
+      expect(result.result, isNotNull);
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isTrue, reason: 'Entry arrived via stream');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ext.aitest.wait_for_request — timeout
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.wait_for_request (timeout)', () {
+    setUp(() {
+      AiTestHttpInterceptor.resetForTesting();
+    });
+
+    test('returns matched:false with reason:timeout when no entry ever matches',
+        () async {
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': '/never/gonna/match',
+          'timeoutMs': '300',
+        },
+      );
+
+      expect(result.result, isNotNull);
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isFalse);
+      expect(body['reason'], equals('timeout'));
+      expect(body.containsKey('recentCount'), isTrue);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ext.aitest.wait_for_request — URL regex matching
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.wait_for_request (URL regex)', () {
+    setUp(() {
+      AiTestHttpInterceptor.resetForTesting();
+    });
+
+    test('matches URL using regex pattern', () async {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/monitors/42/metrics',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': r'/monitors/.*/metrics',
+          'timeoutMs': '1000',
+        },
+      );
+
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isTrue);
+    });
+
+    test('does not match when URL does not satisfy the regex', () async {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/incidents/list',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': r'/monitors/.*/metrics',
+          'timeoutMs': '200',
+        },
+      );
+
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isFalse, reason: 'URL does not match the regex');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ext.aitest.wait_for_request — method filter
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.wait_for_request (method filter)', () {
+    setUp(() {
+      AiTestHttpInterceptor.resetForTesting();
+    });
+
+    test('skips entry when method does not match', () async {
+      final interceptor = AiTestHttpInterceptor.instance;
+      // Enqueue a GET entry — we will filter for POST.
+      interceptor.onRequest(MagicRequest(
+        url: '/monitors',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': '/monitors',
+          'method': 'POST',
+          'timeoutMs': '200',
+        },
+      );
+
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isFalse,
+          reason: 'GET entry skipped by POST filter');
+    });
+
+    test('matches when method matches', () async {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/monitors',
+        method: 'POST',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 201,
+        headers: const {},
+        message: 'Created',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': '/monitors',
+          'method': 'POST',
+          'timeoutMs': '1000',
+        },
+      );
+
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isTrue);
+      expect(body['method'], equals('POST'));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ext.aitest.wait_for_request — status range filter
+  // ---------------------------------------------------------------------------
+
+  group('ext.aitest.wait_for_request (status range)', () {
+    setUp(() {
+      AiTestHttpInterceptor.resetForTesting();
+    });
+
+    test('matches when statusCode is within minStatus/maxStatus range',
+        () async {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/data',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 404,
+        headers: const {},
+        message: 'Not Found',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': '/data',
+          'minStatus': '400',
+          'maxStatus': '499',
+          'timeoutMs': '1000',
+        },
+      );
+
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isTrue);
+      expect(body['statusCode'], equals(404));
+    });
+
+    test('skips entry when statusCode is outside the status range', () async {
+      final interceptor = AiTestHttpInterceptor.instance;
+      interceptor.onRequest(MagicRequest(
+        url: '/data',
+        method: 'GET',
+        headers: const {},
+        data: null,
+        queryParameters: const {},
+      ));
+      interceptor.onResponse(MagicResponse(
+        data: null,
+        statusCode: 200,
+        headers: const {},
+        message: 'OK',
+      ));
+
+      final result = await aiTestWaitForRequestHandler(
+        'ext.aitest.wait_for_request',
+        <String, String>{
+          'urlPattern': '/data',
+          'minStatus': '400',
+          'maxStatus': '499',
+          'timeoutMs': '200',
+        },
+      );
+
+      final body = jsonDecode(result.result!) as Map<String, dynamic>;
+      expect(body['matched'], isFalse, reason: '200 is outside 400-499 range');
     });
   });
 }

@@ -17,6 +17,7 @@ import type { EvaluateResult } from '../types.js';
  * | `flutter_screenshot`  | `ext.aitest.screenshot`    | base64 image content + mimeType  |
  * | `flutter_evaluate`    | VM Service `evaluate` RPC  | JSON-stringified `@Instance`     |
  * | `flutter_wait_for`    | `ext.aitest.wait_for`      | JSON-stringified `{matched, ...}`|
+ * | `flutter_wait_for_request` | `ext.aitest.wait_for_request` | JSON `{matched, url, method, statusCode, durationMs, timestamp}` |
  *
  * `flutter_evaluate` carries forward the V2 `evaluate_dart` semantics
  * (rootLib-scoped evaluation against the running isolate). It is registered
@@ -74,6 +75,7 @@ export function registerSnapshotTools(
     registerScreenshotTool(server, ctx);
     registerEvaluateTool(server, ctx);
     registerWaitForTool(server, ctx);
+    registerWaitForRequestTool(server, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +335,95 @@ function registerWaitForTool(server: McpServer, ctx: ToolContext): void {
                 };
             } catch (err) {
                 return errorEnvelope('flutter_wait_for', err);
+            }
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// flutter_wait_for_request
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire dock for `flutter_wait_for_request`. Pass-through to
+ * `ext.aitest.wait_for_request`. Returns the Dart-side envelope verbatim as
+ * JSON text so agents can branch on `matched` directly without parsing
+ * nested structures.
+ *
+ * The Dart handler runs a two-phase match:
+ * 1. Scan the existing HTTP ring buffer (50 most recent) for an entry that
+ *    already satisfies the predicate — agents may call this AFTER the
+ *    network round-trip completed.
+ * 2. If no buffered match, subscribe to the broadcast stream and wait up to
+ *    `timeoutMs` for the next satisfying entry.
+ *
+ * No client-side polling: the subscribe-or-scan happens Dart-side so the
+ * agent pays a single RPC round-trip regardless of when the request lands.
+ */
+function registerWaitForRequestTool(server: McpServer, ctx: ToolContext): void {
+    server.registerTool(
+        'flutter_wait_for_request',
+        {
+            description:
+                'Wait until an HTTP request captured by the in-app interceptor matches the given URL/method/status predicate, or the timeout elapses. Scans the recent buffer first, then subscribes to new entries — agents call this both before and after the round-trip without a race.',
+            inputSchema: {
+                urlPattern: z
+                    .string()
+                    .min(1, 'urlPattern must be a non-empty regex')
+                    .describe(
+                        'Regex matched against the request URL (e.g. "/monitors/\\\\d+/metrics"). Bare strings work because regex literal characters match themselves.',
+                    ),
+                method: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Optional exact HTTP method filter (case-insensitive): GET, POST, PATCH, DELETE, ...',
+                    ),
+                minStatus: z
+                    .coerce.number()
+                    .int()
+                    .optional()
+                    .describe(
+                        'Optional inclusive lower bound for statusCode. Omit to accept any status.',
+                    ),
+                maxStatus: z
+                    .coerce.number()
+                    .int()
+                    .optional()
+                    .describe(
+                        'Optional inclusive upper bound for statusCode. Pair with minStatus for ranges like 200-299 or 400-499.',
+                    ),
+                timeoutMs: z
+                    .coerce.number()
+                    .int()
+                    .positive()
+                    .default(5000)
+                    .describe(
+                        'Timeout in milliseconds. Defaults to 5000. Coerces string values (some agents send numbers as JSON strings).',
+                    ),
+            },
+            annotations: { readOnlyHint: true },
+        },
+        async (args): Promise<CallToolResult> => {
+            try {
+                const isolateId = await ctx.getIsolateId();
+                const params = stringifyExtParams({
+                    isolateId,
+                    urlPattern: args.urlPattern,
+                    method: args.method,
+                    minStatus: args.minStatus,
+                    maxStatus: args.maxStatus,
+                    timeoutMs: args.timeoutMs,
+                });
+                const response = await ctx.call<Record<string, unknown>>(
+                    'ext.aitest.wait_for_request',
+                    params,
+                );
+                return {
+                    content: [{ type: 'text', text: JSON.stringify(response) }],
+                };
+            } catch (err) {
+                return errorEnvelope('flutter_wait_for_request', err);
             }
         },
     );

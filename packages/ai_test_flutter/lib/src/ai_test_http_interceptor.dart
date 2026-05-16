@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:developer' as developer;
 
@@ -158,6 +159,27 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
 
   /// Ring buffer of captured request/response records.
   final Queue<Map<String, dynamic>> _buffer = Queue();
+
+  // ---------------------------------------------------------------------------
+  // Stream — new-entry broadcast
+  // ---------------------------------------------------------------------------
+
+  /// Lazy broadcast controller. Allocated on first [newEntries] access.
+  ///
+  /// The singleton lives for the lifetime of the isolate; no explicit dispose
+  /// is needed. Listeners subscribe and cancel individually — the controller
+  /// itself is never closed.
+  StreamController<Map<String, dynamic>>? _streamController;
+
+  /// A broadcast stream that emits each entry as it enters the ring buffer.
+  ///
+  /// Subscribe here to receive real-time HTTP records without polling.
+  /// The stream is broadcast (multiple listeners supported simultaneously).
+  /// Each emitted map is the same deep-copy produced by [recentRequests].
+  Stream<Map<String, dynamic>> get newEntries {
+    _streamController ??= StreamController<Map<String, dynamic>>.broadcast();
+    return _streamController!.stream;
+  }
 
   // ---------------------------------------------------------------------------
   // Registration
@@ -336,6 +358,8 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
       _buffer.removeFirst();
     }
     _buffer.addLast(entry);
+    // Notify stream subscribers if the controller has been allocated.
+    _streamController?.add(Map<String, dynamic>.from(entry));
   }
 
   // ---------------------------------------------------------------------------

@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 
 import 'package:flutter/semantics.dart';
 import 'package:flutter/widgets.dart';
 
+import 'ai_test_http_interceptor.dart';
 import 'ref_registry.dart';
 import 'v3_register.dart';
 
@@ -527,6 +529,200 @@ SemanticsFlag? _roleToFlag(String? role) {
     _ => null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// ext.aitest.wait_for_request
+// ---------------------------------------------------------------------------
+
+/// Handler for the `ext.aitest.wait_for_request` VM Service extension.
+///
+/// Blocks (Dart-side) until an HTTP request captured by
+/// [AiTestHttpInterceptor] matches the supplied predicate, or until
+/// [timeoutMs] elapses.
+///
+/// Match strategy is two-phase to avoid race conditions between the buffer
+/// state at call time and entries arriving while the handler is suspended:
+/// 1. Inspect the existing ring buffer for an entry that already satisfies
+///    the predicate (pre-match path — the LLM agent may call this after the
+///    network round-trip already completed).
+/// 2. If no buffered match, subscribe to [AiTestHttpInterceptor.newEntries]
+///    and wait for the first new entry that satisfies the predicate.
+///
+/// The two phases run inside a single async function so a buffered match
+/// short-circuits without subscribing, while the post-call subscription only
+/// races against entries enqueued AFTER the buffer inspection.
+///
+/// Params (all string-valued — `developer.registerExtension` hands handlers
+/// a `Map<String, String>`):
+/// - `urlPattern` (required): regex matched against the request URL via
+///   [RegExp.hasMatch] (substring containment is not used so the agent gets
+///   anchor control; bare strings like `/monitors` still match because
+///   regex literal characters match themselves).
+/// - `method` (optional): exact HTTP method match (case-insensitive).
+///   When omitted any method satisfies the predicate.
+/// - `minStatus` (optional): inclusive lower bound for `statusCode`.
+/// - `maxStatus` (optional): inclusive upper bound for `statusCode`.
+/// - `timeoutMs` (optional): milliseconds before the extension gives up.
+///   Defaults to 5000ms (matches [_kDefaultTimeoutMs]).
+///
+/// Response shape:
+/// ```json
+/// {
+///   "matched": true,
+///   "url": "/monitors/42/metrics",
+///   "method": "GET",
+///   "statusCode": 200,
+///   "durationMs": 87,
+///   "timestamp": "2026-05-16T12:34:56.789Z"
+/// }
+/// ```
+///
+/// On timeout:
+/// ```json
+/// {
+///   "matched": false,
+///   "reason": "timeout",
+///   "recentCount": 3
+/// }
+/// ```
+///
+/// `recentCount` exposes the current ring buffer size so the agent can decide
+/// whether to retry with a relaxed pattern, inspect recent requests, or
+/// abandon. The buffer cap (50) is enforced by [AiTestHttpInterceptor].
+Future<developer.ServiceExtensionResponse> aiTestWaitForRequestHandler(
+  String method,
+  Map<String, String> params,
+) async {
+  try {
+    final String? urlPattern = params['urlPattern'];
+    if (urlPattern == null || urlPattern.isEmpty) {
+      return developer.ServiceExtensionResponse.error(
+        developer.ServiceExtensionResponse.extensionError,
+        '[ai-test-v3] ext.aitest.wait_for_request: missing required param '
+        '"urlPattern"',
+      );
+    }
+
+    final RegExp urlRe;
+    try {
+      urlRe = RegExp(urlPattern);
+    } on FormatException catch (e) {
+      return developer.ServiceExtensionResponse.error(
+        developer.ServiceExtensionResponse.extensionError,
+        '[ai-test-v3] ext.aitest.wait_for_request: invalid urlPattern regex: $e',
+      );
+    }
+
+    final String? methodFilter = params['method'];
+    final int? minStatus = _parseInt(params['minStatus']);
+    final int? maxStatus = _parseInt(params['maxStatus']);
+    final int timeoutMs = _parseInt(params['timeoutMs']) ?? _kDefaultTimeoutMs;
+
+    final interceptor = AiTestHttpInterceptor.instance;
+
+    // 1. Pre-match: walk the existing ring buffer first. The agent may call
+    //    this after the request already completed, in which case we return
+    //    immediately without subscribing to the stream.
+    for (final entry in AiTestHttpInterceptor.recentRequests()) {
+      if (_matchesRequest(entry, urlRe, methodFilter, minStatus, maxStatus)) {
+        return developer.ServiceExtensionResponse.result(
+          jsonEncode(_buildMatchPayload(entry)),
+        );
+      }
+    }
+
+    // 2. No buffered match — subscribe to the broadcast stream and wait for
+    //    the first new entry that satisfies the predicate. Stream.firstWhere
+    //    naturally cancels its subscription on match; the timeout closure
+    //    returns null which we distinguish from a real null entry (entries
+    //    are always non-null maps).
+    final Map<String, dynamic> match = await interceptor.newEntries
+        .firstWhere(
+          (entry) =>
+              _matchesRequest(entry, urlRe, methodFilter, minStatus, maxStatus),
+          orElse: () => const <String, dynamic>{'__sentinel__': true},
+        )
+        .timeout(
+          Duration(milliseconds: timeoutMs),
+          onTimeout: () => const <String, dynamic>{'__sentinel__': true},
+        );
+
+    if (match['__sentinel__'] == true) {
+      return developer.ServiceExtensionResponse.result(
+        jsonEncode(<String, dynamic>{
+          'matched': false,
+          'reason': 'timeout',
+          'recentCount': AiTestHttpInterceptor.recentRequests().length,
+        }),
+      );
+    }
+
+    return developer.ServiceExtensionResponse.result(
+      jsonEncode(_buildMatchPayload(match)),
+    );
+  } catch (e, stackTrace) {
+    developer.log(
+      '[ai-test-v3] ext.aitest.wait_for_request error: $e\n$stackTrace',
+      name: 'ai-test',
+    );
+    return developer.ServiceExtensionResponse.error(
+      developer.ServiceExtensionResponse.extensionError,
+      e.toString(),
+    );
+  }
+}
+
+/// Returns true when [entry] satisfies every active filter.
+///
+/// All filters are AND-combined: an entry matches when the URL regex hits AND
+/// the method matches (when supplied) AND the statusCode falls within the
+/// optional inclusive [minStatus]..[maxStatus] range.
+bool _matchesRequest(
+  Map<String, dynamic> entry,
+  RegExp urlRe,
+  String? method,
+  int? minStatus,
+  int? maxStatus,
+) {
+  // 1. URL must match the regex. Use full-string regex match; agents that
+  //    want a substring use `.*foo.*` or rely on regex literal characters.
+  final String url = (entry['url'] as String?) ?? '';
+  if (!urlRe.hasMatch(url)) return false;
+
+  // 2. Optional method filter — case-insensitive exact match.
+  if (method != null && method.isNotEmpty) {
+    final String entryMethod = (entry['method'] as String?) ?? '';
+    if (entryMethod.toUpperCase() != method.toUpperCase()) return false;
+  }
+
+  // 3. Optional status range filter — both bounds inclusive. statusCode is 0
+  //    on network error; agents that want to wait for errors pass
+  //    minStatus=0 maxStatus=0 (the buffer captures errors as such entries).
+  final int statusCode = (entry['statusCode'] as int?) ?? 0;
+  if (minStatus != null && statusCode < minStatus) return false;
+  if (maxStatus != null && statusCode > maxStatus) return false;
+
+  return true;
+}
+
+/// Builds the on-match payload from a buffer entry.
+///
+/// Strips internal bookkeeping fields (`isError`) and adds the top-level
+/// `matched: true` marker the agent branches on.
+Map<String, dynamic> _buildMatchPayload(Map<String, dynamic> entry) {
+  return <String, dynamic>{
+    'matched': true,
+    'url': entry['url'],
+    'method': entry['method'],
+    'statusCode': entry['statusCode'],
+    'durationMs': entry['durationMs'],
+    'timestamp': entry['timestamp'],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Element-for-semantics-node helper
+// ---------------------------------------------------------------------------
 
 /// Attempts to locate the [Element] that owns [node].
 ///

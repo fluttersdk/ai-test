@@ -4,9 +4,12 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.js';
 
 /**
- * Expected V3 MCP tool catalog after Oracle cull (19 entries).
+ * Expected V3 MCP tool catalog — 22 entries after D9 adds
+ * flutter_wait_for_request.
  *
  * Step 18 ships 19 EMPTY tool slots; Wave 6 (Steps 19-22) fills the handlers.
+ * D10 (Step 10) adds flutter_dismiss_modals → 21. D9 (Step 9) adds
+ * flutter_wait_for_request → 22.
  * The 4 culled tools (`flutter_inspect_state`, `flutter_inspect_form`,
  * `flutter_handle_dialog`, `flutter_hot_reload`) must NOT appear here.
  */
@@ -14,11 +17,12 @@ const EXPECTED_TOOL_NAMES: ReadonlyArray<string> = [
     // V2 carry-overs (renamed).
     'flutter_evaluate',
     'flutter_get_routes',
-    // V3 navigation + lifecycle (Wave 6 Step 19).
+    // V3 navigation + lifecycle (Wave 6 Step 19) + D10 dismiss_modals.
     'flutter_navigate',
     'flutter_navigate_back',
     'flutter_close_app',
     'flutter_resize',
+    'flutter_dismiss_modals',
     // V3 interaction (Wave 6 Step 20).
     'flutter_tap',
     'flutter_type',
@@ -32,6 +36,7 @@ const EXPECTED_TOOL_NAMES: ReadonlyArray<string> = [
     'flutter_snapshot',
     'flutter_screenshot',
     'flutter_wait_for',
+    'flutter_wait_for_request',
     // V3 network + mock (Wave 6 Step 22).
     'flutter_network_requests',
     'flutter_console_messages',
@@ -76,13 +81,13 @@ async function bootInMemoryServer(): Promise<{
 }
 
 describe('createServer()', () => {
-    it('exposes exactly 20 MCP tools matching the V3 catalog', async () => {
+    it('exposes exactly 22 MCP tools matching the V3 catalog', async () => {
         const { client, cleanup } = await bootInMemoryServer();
         try {
             const { tools } = await client.listTools();
             const names = tools.map((t) => t.name).sort();
             expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
-            expect(tools).toHaveLength(20);
+            expect(tools).toHaveLength(22);
         } finally {
             await cleanup();
         }
@@ -136,6 +141,7 @@ describe('createServer()', () => {
                         height: 800,
                         pattern: '/api/*',
                         response: {},
+                        urlPattern: '/api/.*',
                     },
                 });
                 const content = result.content as ReadonlyArray<{
