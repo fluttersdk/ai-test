@@ -1,128 +1,103 @@
-# ai-test-mcp
+# ai-test-mcp (V3)
 
-Model Context Protocol (MCP) server bridging LLM agents (Claude Desktop, Cursor,
-etc.) to a running Flutter Web app via the Dart VM Service Protocol.
+Model Context Protocol (MCP) server bridging LLM agents (Claude Desktop, Cursor, custom) to a running Flutter web app via the Dart VM Service Protocol.
 
-Companion to `ai_test_flutter` v2 (Dart plugin) and `playwright-cli` (web spec
-runner). Together these form the Hybrid B+C architecture: Flutter's native
-Semantics tree as the primary selector surface, the VM Service as the structured
-state inspection fallback.
+V3 = MCP-only single-channel. One `flutter run -d chrome` session, one VM Service WebSocket, 19 tools. No Playwright, no DOM mirror.
 
-## Tools
+Companion to `ai_test_flutter` v3 (Dart plugin + `bin/` CLI). Together they form the V3 architecture.
 
-| Tool              | Underlying RPC                            | Purpose                                                          |
-|-------------------|-------------------------------------------|------------------------------------------------------------------|
-| `get_widget_tree` | `ext.flutter.inspector.getRootWidgetTree` | Full Flutter widget tree (type, key, props, bounding boxes).     |
-| `evaluate_dart`   | `evaluate`                                | Run a Dart expression scoped to `main.dart`. Magic.find, Auth, … |
-| `get_routes`      | `ext.aitest.getRoutes`                    | Current GoRouter location + page title.                          |
+## Tools (19, post Oracle cull)
+
+| Tool | Underlying RPC | Purpose |
+|---|---|---|
+| `flutter_navigate` | `ext.aitest.navigate` | MagicRoute.to(route) |
+| `flutter_navigate_back` | `ext.aitest.navigate_back` | MagicRoute.back() |
+| `flutter_get_routes` | `ext.aitest.get_routes` | Current location + title |
+| `flutter_close_app` | vmClient.disconnect (soft) | Detach MCP from running flutter |
+| `flutter_resize` | DEFERRED ALPHA | Use Chrome devtools manually |
+| `flutter_snapshot` | `ext.aitest.snapshot` | YAML accessibility tree with `[ref=eN]` ids + magicFormField enrichment |
+| `flutter_screenshot` | `ext.aitest.screenshot` | base64 JPEG q70 (default) or PNG via RepaintBoundary.toImage |
+| `flutter_evaluate` | VM Service `evaluate` RPC | Arbitrary Dart expression vs rootLib (state inspection) |
+| `flutter_tap` | `ext.aitest.tap` | Pointer Down + Up at ref's centroid; tap-then-requestKeyboard for text fields |
+| `flutter_type` | `ext.aitest.type` | controller.value mutation + endOfFrame x2 |
+| `flutter_press_key` | `ext.aitest.press_key` | HardwareKeyboard KeyDown + KeyUp |
+| `flutter_hover` | `ext.aitest.hover` | PointerHoverEvent for MouseRegion |
+| `flutter_drag` | `ext.aitest.drag` | Down + 5×Move + Up between two refs |
+| `flutter_select_option` | `ext.aitest.select_option` | DropdownButton.onChanged invocation |
+| `flutter_file_upload` | DEFERRED V3.1 | browser File API not programmatically fillable from VM Service |
+| `flutter_wait_for` | `ext.aitest.wait_for` | Poll for text presence/absence/expression with timeout |
+| `flutter_network_requests` | `ext.aitest.network_requests` | Last 50 HTTP calls from Dio interceptor ring buffer |
+| `flutter_console_messages` | `ext.aitest.console_messages` | Last 100 logs from Logger.root.onRecord ring buffer |
+| `flutter_mock_http` | `ext.aitest.mock_http` | Register interceptor short-circuit rule |
+
+**Dropped per Oracle cull**: `flutter_inspect_state`, `flutter_inspect_form`, `flutter_handle_dialog`, `flutter_hot_reload`. State inspection uses the `flutter_evaluate` pattern below; form fields live inside snapshot YAML.
+
+## State inspection pattern
+
+Without dart2js reflection a typed `flutter_inspect_state(controllerName)` would be a fake hint. Use `flutter_evaluate` directly with the explicit class name:
+
+```typescript
+await client.callTool({
+  name: 'flutter_evaluate',
+  arguments: { expression: 'Magic.find<MonitorController>().rxState.value.toString()' },
+});
+// → { content: [{ type: 'text', text: '<serialized state>' }] }
+```
+
+For raw Magic facade reads:
+
+```typescript
+{ expression: 'Auth.user()?.email' }
+{ expression: 'MagicRouter.instance.currentLocation' }
+{ expression: 'Cache.get("monitors", "[]")' }
+```
 
 ## Install (dev mode)
 
-V2 does not publish to npm. The MCP server runs directly from source via `tsx`:
+V3 does not publish to npm. The MCP server runs directly from source via `tsx`:
 
 ```bash
 cd references/ai-test/packages/ai_test_node
-bun install                # or `npm install`
-bun run typecheck          # verify
-bun run test               # vitest, no live VM Service required
-bun run dev                # boots the server on stdio for manual probing
+bun install            # or npm install
+bun run typecheck      # tsc --noEmit
+bun run test           # vitest (73 tests, no live VM Service required)
+bun run dev            # boots the server on stdio for manual probing
 ```
 
-## Environment
+## MCP host config
 
-| Variable                   | Default                  | Purpose                                                 |
-|----------------------------|--------------------------|---------------------------------------------------------|
-| `AI_TEST_VM_SERVICE_URI`   | `ws://127.0.0.1:8181/ws` | WebSocket endpoint of the Flutter app's VM Service.     |
+Add to your MCP client config (Claude Desktop, Cursor, etc.):
 
-The default matches a Flutter app launched with:
+```json
+{
+  "mcpServers": {
+    "ai-test": {
+      "command": "bun",
+      "args": ["x", "tsx", "src/cli.ts"],
+      "cwd": "/absolute/path/to/references/ai-test/packages/ai_test_node"
+    }
+  }
+}
+```
+
+The server reads the VM Service URI from `~/.ai-test/state.json` (written by the `ai_test_flutter` CLI's `start` command). If absent, falls back to `AI_TEST_VM_SERVICE_URI` env var, otherwise defaults to `ws://127.0.0.1:8181/ws`.
+
+## Operator workflow
 
 ```bash
-flutter run -d chrome --web-port=3100 \
-  --enable-vm-service --disable-service-auth-codes
+# Terminal 1 — boot the Flutter app
+cd /path/to/host/flutter/app
+dart run ai_test_flutter:ai_test_flutter start
+# → Chrome opens with the app; ~/.ai-test/state.json written.
+
+# Agent (separate process via MCP stdio) now has 19 tools.
+
+# Terminal 1 — when done
+dart run ai_test_flutter:ai_test_flutter stop
 ```
 
-If you run with auth codes enabled, copy the URI from the launcher's stdout
-(e.g. `ws://127.0.0.1:8181/<token>/ws`) and export it as
-`AI_TEST_VM_SERVICE_URI`.
+## References
 
-## MCP Client Configuration
-
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "ai-test": {
-      "command": "npx",
-      "args": [
-        "tsx",
-        "/absolute/path/to/uptizm-app/references/ai-test/packages/ai_test_node/src/index.ts"
-      ],
-      "env": {
-        "AI_TEST_VM_SERVICE_URI": "ws://127.0.0.1:8181/ws"
-      }
-    }
-  }
-}
-```
-
-### Cursor
-
-`Settings → Tools & Integrations → MCP Servers → Edit Config`:
-
-```json
-{
-  "mcpServers": {
-    "ai-test": {
-      "command": "npx",
-      "args": [
-        "tsx",
-        "/absolute/path/to/uptizm-app/references/ai-test/packages/ai_test_node/src/index.ts"
-      ]
-    }
-  }
-}
-```
-
-After saving, restart the host. The three tools (`get_widget_tree`,
-`evaluate_dart`, `get_routes`) appear under the `ai-test` server entry.
-
-## Architecture Notes
-
-- Transport: stdio only (V2 scope). HTTP transport is deliberately out of scope.
-- WebSocket: `ws` library; one connection per server lifetime, lazily opened on
-  first tool call. Pending requests are rejected with `VmServiceError` if the
-  socket closes mid-flight.
-- Tool input validation: `zod`. Invalid input surfaces as `McpError` with
-  `code: -32602` (InvalidParams).
-- Tool runtime errors: `VmServiceError` from the client is translated to
-  `McpError` with `code: -32000` (ConnectionClosed / server error).
-- Caching: the `evaluate_dart` tool resolves the isolate's root library id
-  once via `getIsolate` and caches it per session so subsequent expressions
-  share the same Dart scope as `package:<app>/main.dart`.
-
-## Layout
-
-```
-src/
-├── index.ts              # MCP server entry; stdio transport; lazy VM client
-├── types.ts              # Shared TypeScript types (VM Service shapes)
-├── vm_service_client.ts  # ws-based JSON-RPC 2.0 client
-└── tools/
-    ├── index.ts          # Barrel + registerAll(server, vmClient)
-    ├── get_widget_tree.ts
-    ├── evaluate_dart.ts
-    └── get_routes.ts
-test/
-├── vm_service_client.test.ts  # ws-based fake VM Service
-└── tools.test.ts              # mocked ToolContext per tool
-```
-
-## Limitations
-
-- No HTTP transport (stdio only).
-- No auto-reconnect after VM Service drops; the next tool call attempts a fresh
-  connect, so a restarted Flutter app recovers without an MCP host restart.
-- Single isolate only (web apps; main isolate is the only one).
+- Architecture: `references/ai-test/V3_OVERVIEW.md`
+- Walkthrough: `.ac/plans/ai-test-v3/evidence/walkthrough.ts` + readme
+- Plan: `.ac/plans/ai-test-v3/plan.md`
