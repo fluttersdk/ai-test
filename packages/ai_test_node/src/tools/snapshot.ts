@@ -151,6 +151,16 @@ function registerScreenshotTool(server: McpServer, ctx: ToolContext): void {
                     .describe(
                         'Optional ref from a prior `flutter_snapshot`; falls back to whole-screen capture.',
                     ),
+                rect: z
+                    .string()
+                    .regex(
+                        /^\d+(\.\d+)?,\d+(\.\d+)?,\d+(\.\d+)?,\d+(\.\d+)?$/,
+                        'rect must be `x,y,w,h` (logical pixels, non-negative numbers).',
+                    )
+                    .optional()
+                    .describe(
+                        'Optional `x,y,w,h` sub-rect (logical pixels) relative to the `ref` widget\'s paint bounds. Requires `ref`; rect-only calls are rejected Dart-side.',
+                    ),
                 format: z
                     .enum(['png', 'jpeg'])
                     .optional()
@@ -171,6 +181,7 @@ function registerScreenshotTool(server: McpServer, ctx: ToolContext): void {
                 const params = stringifyExtParams({
                     isolateId,
                     ref: args.ref,
+                    rect: args.rect,
                     format: args.format,
                     quality: args.quality,
                 });

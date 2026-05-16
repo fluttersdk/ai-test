@@ -1,6 +1,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -9,6 +10,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img_lib;
+
+// Direct src import for handler access — barrel exports encodeToJpeg /
+// registerScreenshotExtension but not the orchestrator-exposed
+// screenshotHandler. MUST use the `package:` URI (not a relative `../lib`
+// path) so the static [RefRegistry] instance the handler resolves matches
+// the one tests register against. Mixing `package:` and relative imports of
+// the same Dart library creates two independent copies of the library's
+// static state — a Dart compiler pitfall the V3 ref registry is exposed to.
+import 'package:ai_test_flutter/src/ext_screenshot.dart' as ext_screenshot;
 
 /// Tests for [registerScreenshotExtension] (Step 11 of V3 plan).
 ///
@@ -29,6 +39,11 @@ import 'package:image/image.dart' as img_lib;
 /// 4. The JPEG path returns bytes that start with the SOI marker (0xFF 0xD8)
 ///    and fit within the 40-120 KB budget for a q70 encode.
 /// 5. [encodeToJpeg] correctly produces JPEG-shaped output from PNG input.
+/// 6. D11 — no params → full-viewport capture (regression guard).
+/// 7. D11 — ref only → image dimensions match the ref's render-object
+///    paintBounds (cropped via [OffsetLayer.toImage]).
+/// 8. D11 — ref + rect → image dimensions match the rect region.
+/// 9. D11 — malformed rect → handler returns [ServiceExtensionResponse.error].
 void main() {
   group('registerScreenshotExtension', () {
     test('idempotent — second call does not throw', () {
@@ -271,6 +286,280 @@ void main() {
         // 4. SOI marker present.
         expect(jpegBytes[0], equals(0xFF));
         expect(jpegBytes[1], equals(0xD8));
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // D11 — region screenshot (TDD scenarios)
+  // ---------------------------------------------------------------------------
+
+  group('D11 — no params → full-viewport regression guard', () {
+    testWidgets(
+      'screenshotHandler with no ref/rect returns positive dimensions',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(400, 300);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Container(
+              width: 400,
+              height: 300,
+              color: Colors.green,
+            ),
+          ),
+        );
+        await tester.pump();
+
+        late developer.ServiceExtensionResponse response;
+        await tester.runAsync(() async {
+          // Call the package-private handler with no ref/rect — existing
+          // full-viewport path must be preserved (regression guard).
+          response = await ext_screenshot.screenshotHandler(
+            'ext.aitest.screenshot',
+            {'format': 'png'},
+          );
+        });
+
+        // A result response has errorCode == -1 (no error). Check result payload.
+        expect(response.result, isNotNull,
+            reason: 'expected result, got error');
+        final Map<String, dynamic> payload =
+            jsonDecode(response.result!) as Map<String, dynamic>;
+        expect(payload['width'], greaterThan(0));
+        expect(payload['height'], greaterThan(0));
+        expect(payload['base64'], isNotEmpty);
+      },
+    );
+  });
+
+  group('D11 — ref only → dimensions match paintBounds', () {
+    setUp(RefRegistry.resetForTesting);
+
+    testWidgets(
+      'screenshotHandler with ref crops image to ref render-object bounds',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(800, 600);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+
+        // 1. Render a 100x80 widget inside a larger viewport. The ref points
+        //    only at the small widget; the crop should produce an image
+        //    significantly smaller than the full 800×600 viewport.
+        final GlobalKey widgetKey = GlobalKey();
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Stack(
+              children: [
+                Container(color: Colors.white),
+                Positioned(
+                  top: 50,
+                  left: 60,
+                  child: RepaintBoundary(
+                    child: SizedBox(
+                      key: widgetKey,
+                      width: 100,
+                      height: 80,
+                      child: ColoredBox(color: Colors.red),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+
+        // 2. Register a ref for the target widget using its RenderObject.
+        //    Include renderObject so the handler's OffsetLayer crop path works.
+        final Element element = tester.element(find.byKey(widgetKey));
+        final RenderBox renderBox = element.findRenderObject()! as RenderBox;
+        final Offset topLeft = renderBox.localToGlobal(Offset.zero);
+        final Rect refRect = topLeft & renderBox.size;
+        final String refToken = RefRegistry.register(
+          rect: refRect,
+          element: element,
+          groupId: 'test-group',
+          isTextField: false,
+          renderObject: renderBox,
+        );
+
+        late developer.ServiceExtensionResponse response;
+        await tester.runAsync(() async {
+          response = await ext_screenshot.screenshotHandler(
+            'ext.aitest.screenshot',
+            {
+              'ref': refToken,
+              'format': 'png',
+            },
+          );
+        });
+
+        expect(response.result, isNotNull,
+            reason: 'expected result, got error');
+        final Map<String, dynamic> payload =
+            jsonDecode(response.result!) as Map<String, dynamic>;
+
+        // 3. Cropped image must be smaller than the full 800×600 viewport.
+        //    At pixelRatio 2.0, the 100×80 widget → 200×160 px (logical px
+        //    at 2x). Width and height must be positive and smaller than
+        //    the viewport (800 logical px = 1600 at pixelRatio 2).
+        final int width = payload['width'] as int;
+        final int height = payload['height'] as int;
+        expect(width, greaterThan(0));
+        expect(height, greaterThan(0));
+        expect(width, lessThan(1600),
+            reason: 'must be cropped, not full viewport');
+        expect(height, lessThan(1200),
+            reason: 'must be cropped, not full viewport');
+      },
+    );
+  });
+
+  group('D11 — ref + rect → dimensions match the rect', () {
+    setUp(RefRegistry.resetForTesting);
+
+    testWidgets(
+      'screenshotHandler with ref + rect crops to the given sub-region',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(800, 600);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+
+        final GlobalKey widgetKey = GlobalKey();
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Stack(
+              children: [
+                Container(color: Colors.white),
+                Positioned(
+                  top: 50,
+                  left: 60,
+                  child: RepaintBoundary(
+                    child: SizedBox(
+                      key: widgetKey,
+                      width: 200,
+                      height: 160,
+                      child: ColoredBox(color: Colors.blue),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final Element element = tester.element(find.byKey(widgetKey));
+        final RenderBox renderBox = element.findRenderObject()! as RenderBox;
+        final Offset topLeft = renderBox.localToGlobal(Offset.zero);
+        final Rect rect = topLeft & renderBox.size;
+        final String refToken = RefRegistry.register(
+          rect: rect,
+          element: element,
+          groupId: 'test-group',
+          isTextField: false,
+          renderObject: renderBox,
+        );
+
+        // Sub-rect: 50×40 region starting at (10, 10) within the ref's bounds.
+        // These are in logical pixels relative to the ref's bounds.
+        const String subRect = '10,10,50,40';
+
+        late developer.ServiceExtensionResponse response;
+        await tester.runAsync(() async {
+          response = await ext_screenshot.screenshotHandler(
+            'ext.aitest.screenshot',
+            {
+              'ref': refToken,
+              'rect': subRect,
+              'format': 'png',
+            },
+          );
+        });
+
+        expect(response.result, isNotNull,
+            reason: 'expected result, got error');
+        final Map<String, dynamic> payload =
+            jsonDecode(response.result!) as Map<String, dynamic>;
+
+        // At pixelRatio 2.0: 50×40 logical → 100×80 physical pixels.
+        final int width = payload['width'] as int;
+        final int height = payload['height'] as int;
+        expect(width, greaterThan(0));
+        expect(height, greaterThan(0));
+        // The rect (50x40 logical) at 2x pixelRatio → 100x80 px; allow small
+        // rounding (±2 px) from sub-pixel boundary snapping.
+        expect(width, closeTo(100, 4),
+            reason: 'rect width 50 logical * 2 = 100px');
+        expect(height, closeTo(80, 4),
+            reason: 'rect height 40 logical * 2 = 80px');
+      },
+    );
+  });
+
+  group('D11 — malformed rect → handler returns error', () {
+    setUp(RefRegistry.resetForTesting);
+
+    testWidgets(
+      'screenshotHandler returns error response for non-numeric rect string',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(400, 300);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+
+        final GlobalKey widgetKey = GlobalKey();
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: RepaintBoundary(
+              child: SizedBox(
+                key: widgetKey,
+                width: 200,
+                height: 100,
+                child: const ColoredBox(color: Colors.red),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final Element element = tester.element(find.byKey(widgetKey));
+        final RenderBox renderBox = element.findRenderObject()! as RenderBox;
+        final Offset topLeft = renderBox.localToGlobal(Offset.zero);
+        final Rect rect = topLeft & renderBox.size;
+        final String refToken = RefRegistry.register(
+          rect: rect,
+          element: element,
+          groupId: 'test-group',
+          isTextField: false,
+          renderObject: renderBox,
+        );
+
+        late developer.ServiceExtensionResponse response;
+        await tester.runAsync(() async {
+          // Pass a malformed rect (not 4 numeric components).
+          response = await ext_screenshot.screenshotHandler(
+            'ext.aitest.screenshot',
+            {
+              'ref': refToken,
+              'rect': 'not,valid,rect',
+              'format': 'png',
+            },
+          );
+        });
+
+        // Must return an error response — not a result. An error response
+        // has errorCode == extensionError and result == null.
+        expect(
+          response.errorCode,
+          equals(developer.ServiceExtensionResponse.extensionError),
+        );
       },
     );
   });
