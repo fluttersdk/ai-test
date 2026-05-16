@@ -47,6 +47,16 @@ import 'v3_register.dart';
 /// VM extension table persists across hot-restart, so a second install would
 /// otherwise throw on the first extension).
 ///
+/// Beyond extension registration, [install] also guards against duplicate
+/// deferred-pump scheduling via an internal [_installCount] counter. On
+/// hot-restart the static counter resets to zero (statics re-run their
+/// initializers), so the first real call after restart performs full setup.
+/// A second call within the same isolate lifetime (e.g. a test calling
+/// [install] twice) increments the counter and returns early before reaching
+/// [_pumpInterceptorRegistration], preventing a duplicate Timer-backoff loop
+/// that would race the first. The VM extension table is unaffected because
+/// [registerExtensionIdempotent] already handles that layer separately.
+///
 /// ## RepaintBoundary
 ///
 /// [rootRepaintBoundaryKey] is a [GlobalKey] that the host app must wrap
@@ -77,12 +87,32 @@ class AiTestPluginV3 {
   /// extension and wires the auto-collecting helpers (Dio interceptor + log
   /// sink land in Step 5).
   ///
-  /// Idempotent: subsequent calls re-enter the registration loop, which is
-  /// itself idempotent via [registerExtensionIdempotent].
+  /// Guarded by [_installCount]: the first call performs full setup; subsequent
+  /// calls within the same isolate lifetime log a skip message and return early.
+  /// This prevents duplicate [_pumpInterceptorRegistration] Timer-backoff loops
+  /// that would race each other on hot-restart scenarios where [install] is
+  /// invoked more than once before the isolate tears down.
   ///
   /// Logs `[ai-test-v3] installed (kDebugMode=$kDebugMode, isWeb=$kIsWeb)` on
-  /// every call so devtools captures the activation timeline.
+  /// the first call so devtools captures the activation timeline.
   static void install() {
+    // A2 guard: per-extension registerExtensionIdempotent calls AND the
+    // _semanticsHandle ??= null-guard below are already idempotent. The actual
+    // risk this guard addresses is _pumpInterceptorRegistration(): on
+    // hot-restart, a second install() schedules a duplicate Timer-based
+    // backoff loop that races the first. Guarding install() prevents that
+    // duplicate scheduling.
+    if (_installCount > 0) {
+      developer.log(
+        '[ai-test-v3] install() called ${_installCount + 1} times — '
+        'skipping duplicate.',
+        name: 'ai-test',
+      );
+      _installCount++;
+      return;
+    }
+    _installCount++;
+
     // 1. The root RepaintBoundary key is created at static-init time; install
     //    is the gate that signals "the plugin is now active". No mutation
     //    needed here — main.dart wraps the boundary using this key.
@@ -121,6 +151,21 @@ class AiTestPluginV3 {
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  /// Counts how many times [install] has been called within this isolate
+  /// lifetime. Zero means not yet installed; 1 means fully installed; 2+
+  /// means duplicate guard fired. Resets to zero on hot-restart (statics
+  /// re-run their initializers), which is the correct behavior: the new
+  /// isolate-start after restart should perform a fresh full install.
+  static int _installCount = 0;
+
+  /// Exposes [_installCount] for test assertions.
+  ///
+  /// Production code must not read this. Tests use it to verify the A2
+  /// guard fires on repeated [install] calls without triggering duplicate
+  /// [_pumpInterceptorRegistration] scheduling.
+  @visibleForTesting
+  static int get installCount => _installCount;
 
   /// Retained Semantics handle so the engine keeps building the accessibility
   /// tree for the lifetime of the plugin (the snapshot extension walks it).

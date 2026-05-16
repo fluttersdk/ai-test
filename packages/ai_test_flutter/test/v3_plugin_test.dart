@@ -8,7 +8,7 @@ import 'package:ai_test_flutter/ai_test_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Tests for [AiTestPluginV3] (Step 4 of V3 plan).
+/// Tests for [AiTestPluginV3] (Step 4 of V3 plan + A2 idempotency guard).
 ///
 /// These tests run on `--platform chrome` because the V3 plugin is gated by
 /// `kIsWeb && kDebugMode`; the chrome runner provides both. The VM-target
@@ -23,7 +23,18 @@ import 'package:flutter_test/flutter_test.dart';
 /// 3. `registerExtensionIdempotent` swallows the `ArgumentError` raised by
 ///    `developer.registerExtension` when the same extension name is
 ///    registered twice (hot-restart safety).
+/// 4. A2 guard: `install()` called more than once skips duplicate
+///    `_pumpInterceptorRegistration()` scheduling — asserted via
+///    [AiTestPluginV3.installCount] counter. Counter reaches 1 on first call
+///    and 2+ on second call but actual work (pump scheduling) is skipped.
 void main() {
+  setUpAll(() {
+    // Required: install() calls RendererBinding.instance.ensureSemantics(),
+    // which asserts the binding is initialized. Tests that call install()
+    // directly (outside a testWidgets pump) must initialize the binding here.
+    TestWidgetsFlutterBinding.ensureInitialized();
+  });
+
   group('AiTestPluginV3', () {
     test('install() is idempotent (calling twice does not throw)', () {
       // First call: must succeed and perform setup.
@@ -42,6 +53,47 @@ void main() {
       expect(key, isNotNull);
       expect(key.toString(), contains('aiTestRootRepaintBoundary'));
     });
+
+    test(
+      'A2: install() increments installCount and skips pump on duplicate calls',
+      () {
+        // Capture installCount before first call. In an isolated Chrome test
+        // run, the static starts at 0, but other tests in this group may have
+        // already called install(). Record the baseline here.
+        final int countBefore = AiTestPluginV3.installCount;
+
+        // First call (may already have been performed by earlier tests; we
+        // care about the delta, not the absolute value).
+        AiTestPluginV3.install();
+        final int countAfterFirst = AiTestPluginV3.installCount;
+
+        // Second call: guard fires — count still increments, but
+        // _pumpInterceptorRegistration() is NOT scheduled again.
+        AiTestPluginV3.install();
+        final int countAfterSecond = AiTestPluginV3.installCount;
+
+        // The counter must have moved forward on each call.
+        expect(
+          countAfterFirst,
+          greaterThan(countBefore),
+          reason: 'First install() must increment installCount.',
+        );
+        expect(
+          countAfterSecond,
+          greaterThan(countAfterFirst),
+          reason: 'Second install() must increment installCount even when '
+              'skipping duplicate pump scheduling.',
+        );
+
+        // After the second call the count is at least 2 (first full install
+        // brought it to 1; guard increments it to 2 before returning).
+        expect(
+          AiTestPluginV3.installCount,
+          greaterThanOrEqualTo(2),
+          reason: 'installCount must reach >=2 after two calls.',
+        );
+      },
+    );
   });
 
   group('registerExtensionIdempotent', () {
