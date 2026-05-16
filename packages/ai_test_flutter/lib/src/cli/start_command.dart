@@ -177,11 +177,18 @@ class StartCommand extends Command<void> {
 
   @override
   Future<void> run() async {
-    final ArgResults parsed = argResults!;
-    final int webPort = int.parse(parsed['port'] as String);
-    final int vmServicePort = int.parse(parsed['vm-service-port'] as String);
-    final bool ddsOn = parsed['dds'] as bool;
-    final bool profileStatic = parsed['profile-static'] as bool;
+    // `argResults` is null when `RestartCommand` invokes `_start.run()`
+    // directly (no CommandRunner dispatch); fall back to argParser defaults
+    // in that case so direct invocation works exactly like the CLI form.
+    final ArgResults? parsed = argResults;
+    final int webPort = int.parse(
+      (parsed?['port'] as String?) ?? '3100',
+    );
+    final int vmServicePort = int.parse(
+      (parsed?['vm-service-port'] as String?) ?? '8181',
+    );
+    final bool ddsOn = (parsed?['dds'] as bool?) ?? false;
+    final bool profileStatic = (parsed?['profile-static'] as bool?) ?? false;
 
     // 1. D6 Layer 1 — pre-flight reaper. Non-fatal; failures are warnings only.
     //    Skipped on Windows because `pgrep` is POSIX-only; document the
