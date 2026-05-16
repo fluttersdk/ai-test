@@ -87,6 +87,7 @@ function errorEnvelopeFor(toolName: string, err: unknown): CallToolResult {
  * - `flutter_hover` — mouse-kind hover over a ref.
  * - `flutter_drag` — pointer drag from startRef to endRef.
  * - `flutter_select_option` — select a value on the dropdown at a ref.
+ * - `flutter_scroll` — scroll into view OR by dy on a Scrollable.
  * - `flutter_file_upload` — DEFERRED to V3.1 (slot returns `isError: true`).
  */
 export function registerInteractionTools(
@@ -101,6 +102,7 @@ export function registerInteractionTools(
     registerFlutterHover(server, ctx);
     registerFlutterDrag(server, ctx);
     registerFlutterSelectOption(server, ctx);
+    registerFlutterScroll(server, ctx);
     registerFlutterFileUpload(server);
 }
 
@@ -345,6 +347,80 @@ function registerFlutterSelectOption(
                 return asTextResult(result);
             } catch (err) {
                 return errorEnvelopeFor('flutter_select_option', err);
+            }
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// flutter_scroll
+// ---------------------------------------------------------------------------
+
+const SCROLL_INPUT_SCHEMA = {
+    ref: z
+        .string()
+        .min(1, 'ref must be a non-empty snapshot reference string')
+        .optional()
+        .describe(
+            'Snapshot ref for a widget inside (or that owns) the target Scrollable. ' +
+                'Required when `intoView: true`; for delta scrolls falls back to the ' +
+                'app-root Scrollable when omitted.',
+        ),
+    dy: z
+        .coerce.number()
+        .optional()
+        .describe(
+            'Vertical scroll delta in logical pixels. Positive scrolls down; ' +
+                'negative scrolls up. Ignored when `intoView: true`.',
+        ),
+    dx: z
+        .coerce.number()
+        .optional()
+        .describe(
+            'Horizontal scroll delta in logical pixels. Reserved for future use ' +
+                '(no Dart-side support yet); ignored when `intoView: true`.',
+        ),
+    intoView: z
+        .boolean()
+        .optional()
+        .describe(
+            'When true, calls `Scrollable.ensureVisible(element, alignment: 0.5)` ' +
+                'so the ref widget scrolls into the viewport center. Required when ' +
+                'a delta would not deterministically reveal the target (e.g. sticky ' +
+                'bars off the bottom of the page).',
+        ),
+} as const;
+
+function registerFlutterScroll(server: McpServer, ctx: ToolContext): void {
+    server.registerTool(
+        'flutter_scroll',
+        {
+            description:
+                'Scroll the widget tree. Pass `{ref, intoView: true}` to scroll the ' +
+                'ref into the viewport centre, or `{ref?, dy}` to shift the (root or ' +
+                'ref-owning) Scrollable by `dy` logical pixels. Returns the ' +
+                "scrollable's final pixel offset.",
+            inputSchema: SCROLL_INPUT_SCHEMA,
+        },
+        async (args): Promise<CallToolResult> => {
+            try {
+                const isolateId = await ctx.getIsolateId();
+                // VM Service extension params are Map<String, String>; coerce
+                // booleans + numbers to string before forwarding so the Dart-side
+                // handler can `int.tryParse` / `== 'true'` them deterministically.
+                const params: Record<string, string> = { isolateId };
+                if (args.ref !== undefined) params.ref = args.ref;
+                if (args.dy !== undefined) params.dy = String(args.dy);
+                if (args.dx !== undefined) params.dx = String(args.dx);
+                if (args.intoView !== undefined)
+                    params.intoView = args.intoView ? 'true' : 'false';
+                const result = await ctx.call<unknown>(
+                    'ext.aitest.scroll',
+                    params,
+                );
+                return asTextResult(result);
+            } catch (err) {
+                return errorEnvelopeFor('flutter_scroll', err);
             }
         },
     );

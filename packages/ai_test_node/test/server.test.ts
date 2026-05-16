@@ -26,6 +26,7 @@ const EXPECTED_TOOL_NAMES: ReadonlyArray<string> = [
     'flutter_hover',
     'flutter_drag',
     'flutter_select_option',
+    'flutter_scroll',
     'flutter_file_upload',
     // V3 snapshot + screenshot + wait (Wave 6 Step 21; flutter_evaluate listed above).
     'flutter_snapshot',
@@ -75,13 +76,13 @@ async function bootInMemoryServer(): Promise<{
 }
 
 describe('createServer()', () => {
-    it('exposes exactly 19 MCP tools matching the V3 catalog', async () => {
+    it('exposes exactly 20 MCP tools matching the V3 catalog', async () => {
         const { client, cleanup } = await bootInMemoryServer();
         try {
             const { tools } = await client.listTools();
             const names = tools.map((t) => t.name).sort();
             expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
-            expect(tools).toHaveLength(19);
+            expect(tools).toHaveLength(20);
         } finally {
             await cleanup();
         }

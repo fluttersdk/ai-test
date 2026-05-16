@@ -125,17 +125,18 @@ const INTERACTION_TOOL_NAMES: ReadonlyArray<string> = [
     'flutter_hover',
     'flutter_drag',
     'flutter_select_option',
+    'flutter_scroll',
     'flutter_file_upload',
 ];
 
 describe('registerInteractionTools()', () => {
-    it('registers all 7 interaction tools on the McpServer', async () => {
+    it('registers all 8 interaction tools on the McpServer', async () => {
         const { client, cleanup } = await bootServerWithInteraction();
         try {
             const { tools } = await client.listTools();
             const names = tools.map((t) => t.name).sort();
             expect(names).toEqual([...INTERACTION_TOOL_NAMES].sort());
-            expect(tools).toHaveLength(7);
+            expect(tools).toHaveLength(8);
         } finally {
             await cleanup();
         }
