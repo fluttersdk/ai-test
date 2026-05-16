@@ -192,4 +192,138 @@ describe('VmServiceClient', () => {
         client = new VmServiceClient(fake.uri);
         await expect(client.call('getVersion')).rejects.toBeInstanceOf(VmServiceError);
     });
+
+    describe('DDS namespace registry', () => {
+        /**
+         * Helper: emits a `streamNotify` Service/ServiceRegistered event on all
+         * connected sockets in the fake server. Mirrors the VM Service Protocol
+         * notification shape confirmed by the Wave 1 spike.
+         */
+        function emitServiceRegistered(
+            serverInstance: FakeVmServer,
+            bareName: string,
+            namespacedName: string,
+        ): void {
+            const notification = JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'streamNotify',
+                params: {
+                    streamId: 'Service',
+                    event: {
+                        type: 'Event',
+                        kind: 'ServiceRegistered',
+                        service: bareName,
+                        method: namespacedName,
+                    },
+                },
+            });
+            for (const socket of serverInstance.sockets) {
+                socket.send(notification);
+            }
+        }
+
+        it(
+            'rewrites ext.aitest.* call to namespaced name when ServiceRegistered fired',
+            async () => {
+                // Record every inbound message (RPC requests from the client).
+                const inboundMessages: Array<{ id: number; method: string; params?: unknown }> = [];
+
+                fake = await startFakeVmServer((req) => {
+                    inboundMessages.push(req);
+                    if (req.method === 'streamListen') return { type: 'Success' };
+                    // Respond to any method so the call() promise resolves.
+                    return { type: 'Success', result: 'ok' };
+                });
+
+                client = new VmServiceClient(fake.uri);
+                await client.connect();
+
+                // Emit a ServiceRegistered notification: DDS-namespaced ext.aitest.tap.
+                emitServiceRegistered(fake, 'ext.aitest.tap', 's0.ext.aitest.tap');
+
+                // Allow the message-event loop to process the notification.
+                await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+                // Call the bare name — client must rewrite to 's0.ext.aitest.tap'.
+                await client.call('ext.aitest.tap', { isolateId: 'isolates/1' });
+
+                // Find the call that was NOT the streamListen setup.
+                const tapCall = inboundMessages.find(
+                    (m) => m.method !== 'streamListen',
+                );
+                expect(tapCall?.method).toBe('s0.ext.aitest.tap');
+            },
+        );
+
+        it(
+            'sends literal bare name when no registry entry exists (Flutter 3.41+ DDS hot path)',
+            async () => {
+                // Under Flutter 3.41.6, custom ext.aitest.* extensions are NOT
+                // namespaced by DDS (only built-ins are). The registry will have
+                // no entry for ext.aitest.tap. The client must send the literal name.
+                const inboundMessages: Array<{ id: number; method: string; params?: unknown }> = [];
+
+                fake = await startFakeVmServer((req) => {
+                    inboundMessages.push(req);
+                    if (req.method === 'streamListen') return { type: 'Success' };
+                    return { type: 'Success', result: 'ok' };
+                });
+
+                client = new VmServiceClient(fake.uri);
+                await client.connect();
+
+                // Do NOT emit any ServiceRegistered for ext.aitest.tap.
+                // Only a built-in gets a prefix — extension stays raw.
+                emitServiceRegistered(fake, 'hotRestart', 's1.hotRestart');
+                await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+                await client.call('ext.aitest.tap', { isolateId: 'isolates/1' });
+
+                const tapCall = inboundMessages.find(
+                    (m) => m.method !== 'streamListen',
+                );
+                // Must be the literal bare name — no rewrite when registry is empty.
+                expect(tapCall?.method).toBe('ext.aitest.tap');
+            },
+        );
+
+        it('clears the service registry on disconnect and reconnect', async () => {
+            const inboundMessages: Array<{ id: number; method: string; params?: unknown }> = [];
+
+            fake = await startFakeVmServer((req) => {
+                inboundMessages.push(req);
+                if (req.method === 'streamListen') return { type: 'Success' };
+                return { type: 'Success', result: 'ok' };
+            });
+
+            client = new VmServiceClient(fake.uri);
+            await client.connect();
+
+            // Register a namespaced extension in the first connection.
+            emitServiceRegistered(fake, 'ext.aitest.snapshot', 's0.ext.aitest.snapshot');
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+            // Disconnect — registry must be cleared.
+            await client.disconnect();
+            client = null;
+
+            // Reconnect to the same server — fresh registry, no prior entry.
+            const freshClient = new VmServiceClient(fake.uri);
+            client = freshClient;
+            await freshClient.connect();
+
+            // Allow time for any stale notification to arrive (should be none).
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+            // Call the extension — no registry entry, so literal bare name is sent.
+            await freshClient.call('ext.aitest.snapshot', { isolateId: 'isolates/1' });
+
+            const snapCalls = inboundMessages.filter(
+                (m) => m.method !== 'streamListen',
+            );
+            // The only snapshot call should use the bare literal name.
+            const lastSnapCall = snapCalls.at(-1);
+            expect(lastSnapCall?.method).toBe('ext.aitest.snapshot');
+        });
+    });
 });
