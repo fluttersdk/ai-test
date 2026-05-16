@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:magic/magic.dart';
 
 import 'v3_register.dart';
@@ -87,9 +87,11 @@ Map<String, dynamic> buildNavigationGetRoutesResponse() => <String, dynamic>{
 /// On missing `route` param: returns an extension error response.
 ///
 /// Navigation is performed via [MagicRoute.to], which is context-free and
-/// safe to call from any isolate. The extension does NOT await a frame settle
-/// because GoRouter navigation is synchronous from the caller's perspective
-/// (the router schedules the rebuild internally).
+/// safe to call from any isolate. Awaits 2× [WidgetsBinding.instance.endOfFrame]
+/// so the post-navigation widget tree settles before returning — without this
+/// an MCP client calling `flutter_snapshot` immediately after `flutter_navigate`
+/// could see the pre-navigation tree (Plan Must Have: every mutating extension
+/// awaits endOfFrame).
 Future<developer.ServiceExtensionResponse> aiTestNavigateHandler(
   String method,
   Map<String, String> params,
@@ -107,7 +109,11 @@ Future<developer.ServiceExtensionResponse> aiTestNavigateHandler(
     //    extension handlers.
     MagicRoute.to(route);
 
-    // 2. Return confirmation so the MCP tool can assert navigation happened.
+    // 2. Wait for the post-navigation paint phase to settle.
+    await WidgetsBinding.instance.endOfFrame;
+    await WidgetsBinding.instance.endOfFrame;
+
+    // 3. Return confirmation so the MCP tool can assert navigation happened.
     return developer.ServiceExtensionResponse.result(
       jsonEncode(buildNavigateResponse(route)),
     );
@@ -136,7 +142,12 @@ Future<developer.ServiceExtensionResponse> aiTestNavigateBackHandler(
     // 1. Go back via the Magic facade — no BuildContext required.
     MagicRoute.back();
 
-    // 2. Return confirmation.
+    // 2. Wait for the post-pop paint phase to settle (Plan Must Have:
+    //    mutating extensions await endOfFrame).
+    await WidgetsBinding.instance.endOfFrame;
+    await WidgetsBinding.instance.endOfFrame;
+
+    // 3. Return confirmation.
     return developer.ServiceExtensionResponse.result(
       jsonEncode(buildNavigateBackResponse()),
     );
