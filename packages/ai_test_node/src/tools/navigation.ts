@@ -249,8 +249,8 @@ function registerFlutterResize(server: McpServer): void {
             description:
                 'Resize the Flutter viewport. Width and height in logical pixels. Phase ALPHA: not yet implemented; use Chrome devtools for now.',
             inputSchema: {
-                width: z.number().positive(),
-                height: z.number().positive(),
+                width: z.coerce.number().positive(),
+                height: z.coerce.number().positive(),
             },
         },
         async (): Promise<CallToolResult> => {

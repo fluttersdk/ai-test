@@ -94,7 +94,7 @@ function registerSnapshotTool(server: McpServer, ctx: ToolContext): void {
                 'Capture a structured YAML snapshot of the current widget tree. Returned `ref` tokens feed every interaction tool (`flutter_tap`, `flutter_type`, ...).',
             inputSchema: {
                 depth: z
-                    .number()
+                    .coerce.number()
                     .int()
                     .positive()
                     .optional()
@@ -156,7 +156,7 @@ function registerScreenshotTool(server: McpServer, ctx: ToolContext): void {
                     .optional()
                     .describe('Image format. Defaults to jpeg on the Dart side.'),
                 quality: z
-                    .number()
+                    .coerce.number()
                     .int()
                     .min(1)
                     .max(100)
@@ -292,11 +292,14 @@ function registerWaitForTool(server: McpServer, ctx: ToolContext): void {
                         'Free-form predicate (currently treated as text-presence on the Dart side).',
                     ),
                 timeoutMs: z
-                    .number()
+                    .coerce.number()
                     .int()
                     .positive()
                     .optional()
-                    .describe('Timeout in milliseconds. Defaults to 5000 Dart-side.'),
+                    .describe(
+                        'Timeout in milliseconds. Defaults to 5000 Dart-side. ' +
+                            'Coerces string values (some agents send numbers as JSON strings).',
+                    ),
             },
             annotations: { readOnlyHint: true },
         },
