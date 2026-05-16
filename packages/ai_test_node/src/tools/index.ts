@@ -1,23 +1,26 @@
-import { z } from 'zod';
-import {
-    CallToolRequestSchema,
-    ListToolsRequestSchema,
-    McpError,
-    ErrorCode,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { VmServiceClient } from '../vm_service_client.js';
+import type { z } from 'zod';
+import type { VmServiceClient } from '../vm_service_client.js';
 import type { ToolResult } from '../types.js';
-import { evaluateDartTool } from './evaluate_dart.js';
-import { getRoutesTool } from './get_routes.js';
-import { getWidgetTreeTool } from './get_widget_tree.js';
+
+/**
+ * Tool barrel for the ai-test MCP server.
+ *
+ * The V2 `Server.setRequestHandler` pattern (and its `ALL_TOOLS` / `VALIDATING_HANDLERS`
+ * registry) is gone — `src/server.ts` now uses `McpServer.registerTool`, which
+ * owns input validation and dispatch internally.
+ *
+ * Wave 6 (Steps 19-22) lands the live tool implementations in their own
+ * modules (`navigation.ts`, `interaction.ts`, `snapshot.ts`, `network.ts`) and
+ * Step 22b re-exports them through this barrel for `createServer()` to import
+ * via a single aggregator call. Until then this file only exposes the shared
+ * `ToolContext` / `ToolDefinition` types the Wave 6 wrappers will conform to.
+ */
 
 /**
  * Context surface a tool handler receives. The handler does not own the VM
  * Service connection; it borrows it from the MCP server's lazy singleton via
- * the two callbacks below. This indirection keeps tools unit-testable: tests
- * supply fake `call` + `getIsolateId` callbacks without spinning up a
- * WebSocket.
+ * the four callbacks below. This indirection keeps tools unit-testable: tests
+ * supply fake callbacks without spinning up a WebSocket.
  */
 export interface ToolContext {
     /**
@@ -30,163 +33,58 @@ export interface ToolContext {
      */
     getRootLibId(isolateId: string): Promise<string>;
     /**
-     * Send a JSON-RPC request to the VM Service.
+     * Send a JSON-RPC request to the VM Service. The wrapped client routes
+     * `ext.aitest.*` calls through DDS-aware namespace mapping (Step 17).
      */
     call<T = unknown>(method: string, params?: object): Promise<T>;
 }
 
 /**
- * Definition of a single MCP tool. The `handler` runs `inputSchema` parsing
- * internally so transport-level invocations and direct unit-test calls share
- * the same validation path.
+ * Definition of a single MCP tool handler. Wave 6 modules export one of these
+ * per tool; the Step 22b aggregator collects them and registers each with
+ * `McpServer.registerTool` inside `createServer()`.
+ *
+ * The `handler` runs against already-validated input (the McpServer parses
+ * `inputSchema` before dispatching). Tests that bypass the MCP transport can
+ * call `inputSchema.parse(args)` themselves and invoke `handler` directly.
  */
 export interface ToolDefinition<TInput> {
     readonly name: string;
     readonly description: string;
     readonly inputSchema: z.ZodType<TInput>;
-    readonly jsonSchema: Record<string, unknown>;
-    handler(ctx: ToolContext, args: unknown): Promise<ToolResult>;
-}
-
-export { evaluateDartTool, getRoutesTool, getWidgetTreeTool };
-
-/**
- * Validate input against the tool's zod schema, translating any parse error
- * into the MCP `InvalidParams` error envelope so the client sees a typed
- * protocol error rather than an unhandled exception.
- */
-function parseInput<TInput>(tool: ToolDefinition<TInput>, args: unknown): TInput {
-    const result = tool.inputSchema.safeParse(args ?? {});
-    if (!result.success) {
-        throw new McpError(
-            ErrorCode.InvalidParams,
-            `${tool.name}: ${result.error.issues.map((i) => i.message).join('; ')}`,
-        );
-    }
-    return result.data;
+    /**
+     * Legacy JSON Schema mirror of `inputSchema`, retained as optional so the
+     * V2 tool files (`evaluate_dart.ts`, `get_routes.ts`) keep compiling until
+     * Step 21 rewrites them. The McpServer pattern derives JSON Schema from
+     * the zod input directly — Wave 6 wrappers should NOT populate this field.
+     */
+    readonly jsonSchema?: Record<string, unknown>;
+    handler(ctx: ToolContext, args: TInput): Promise<ToolResult>;
 }
 
 /**
- * Wrap a tool definition's underlying handler so external callers (the MCP
- * server, the unit tests) always go through input validation first.
+ * Build a `ToolContext` backed by the live `VmServiceClient` (or any object
+ * implementing the same surface, e.g. the `LazyVmClient` proxy from
+ * `server.ts`). Caches the main isolate id under closure so the per-server
+ * lookup happens at most once per process lifetime.
  *
- * The handlers exported by `get_widget_tree.ts`, `evaluate_dart.ts`,
- * `get_routes.ts` accept already-validated input. This barrel re-exposes them
- * with a validating wrapper so callers don't have to parse manually.
+ * Wave 6 tool wrappers will receive a context produced by this helper.
  */
-function makeValidatingHandler<TInput>(
-    tool: { handler(ctx: ToolContext, args: TInput): Promise<ToolResult> },
-    schema: z.ZodType<TInput>,
-    name: string,
-): (ctx: ToolContext, args: unknown) => Promise<ToolResult> {
-    return async (ctx, args) => {
-        const result = schema.safeParse(args ?? {});
-        if (!result.success) {
-            throw new McpError(
-                ErrorCode.InvalidParams,
-                `${name}: ${result.error.issues.map((i) => i.message).join('; ')}`,
-            );
-        }
-        return tool.handler(ctx, result.data);
-    };
-}
-
-/**
- * All MCP tools the server exposes, in registration order. The handler stored
- * on each `ToolDefinition` accepts already-validated input; the validating
- * wrappers in `VALIDATING_HANDLERS` below sit on top for transport-level callers
- * (the MCP server) and direct unit-test invocations.
- */
-export const ALL_TOOLS: ReadonlyArray<ToolDefinition<unknown>> = [
-    getWidgetTreeTool as ToolDefinition<unknown>,
-    evaluateDartTool as ToolDefinition<unknown>,
-    getRoutesTool as ToolDefinition<unknown>,
-];
-
-/**
- * Validating-handler lookup keyed by tool name. Built once at module load by
- * wrapping each tool's raw handler with `makeValidatingHandler`. This keeps the
- * `ToolDefinition.handler` slot immutable (no readonly-cast tricks) while still
- * giving callers a one-stop validating dispatch.
- */
-export const VALIDATING_HANDLERS: ReadonlyMap<
-    string,
-    (ctx: ToolContext, args: unknown) => Promise<ToolResult>
-> = new Map([
-    [
-        getWidgetTreeTool.name,
-        makeValidatingHandler(
-            getWidgetTreeTool,
-            getWidgetTreeTool.inputSchema as z.ZodType<unknown>,
-            getWidgetTreeTool.name,
-        ),
-    ],
-    [
-        evaluateDartTool.name,
-        makeValidatingHandler(
-            evaluateDartTool,
-            evaluateDartTool.inputSchema as z.ZodType<unknown>,
-            evaluateDartTool.name,
-        ),
-    ],
-    [
-        getRoutesTool.name,
-        makeValidatingHandler(
-            getRoutesTool,
-            getRoutesTool.inputSchema as z.ZodType<unknown>,
-            getRoutesTool.name,
-        ),
-    ],
-]);
-
-// `parseInput` is exported in shape only for callers that want to validate
-// outside the handler path. Reference it once so dead-code elimination keeps it.
-void parseInput;
-
-/**
- * Register the MCP `tools/list` and `tools/call` handlers on the given Server
- * instance. The `vmClient` provides the live VM Service connection; tools
- * borrow it through a thin `ToolContext` adapter that caches the main isolate
- * id across calls.
- */
-export function registerAll(server: Server, vmClient: VmServiceClient): void {
+export function makeToolContext(
+    vmClient: Pick<VmServiceClient, 'getMainIsolateId' | 'getRootLibId' | 'call'>,
+): ToolContext {
     let cachedIsolateId: string | null = null;
-
-    const ctx: ToolContext = {
-        async getIsolateId() {
-            if (cachedIsolateId) return cachedIsolateId;
+    return {
+        async getIsolateId(): Promise<string> {
+            if (cachedIsolateId !== null) return cachedIsolateId;
             cachedIsolateId = await vmClient.getMainIsolateId();
             return cachedIsolateId;
         },
-        getRootLibId(isolateId: string) {
+        getRootLibId(isolateId: string): Promise<string> {
             return vmClient.getRootLibId(isolateId);
         },
-        call<T>(method: string, params?: object) {
+        call<T = unknown>(method: string, params?: object): Promise<T> {
             return vmClient.call<T>(method, params ?? {});
         },
     };
-
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: ALL_TOOLS.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.jsonSchema as {
-                type: 'object';
-                properties?: Record<string, unknown>;
-                required?: string[];
-            },
-        })),
-    }));
-
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const { name, arguments: rawArgs } = request.params;
-        const handler = VALIDATING_HANDLERS.get(name);
-        if (!handler) {
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-        }
-        const result = await handler(ctx, rawArgs ?? {});
-        return {
-            content: result.content.map((c) => ({ type: c.type, text: c.text })),
-        };
-    });
 }
