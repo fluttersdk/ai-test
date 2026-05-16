@@ -3,12 +3,71 @@ import 'dart:developer' as developer;
 
 import 'package:magic/magic.dart';
 
+/// A single mock rule registered via [AiTestHttpInterceptor.addMockRule].
+///
+/// [pattern] is matched against the request URL as a substring first; if
+/// [RegExp] construction succeeds and the substring check fails, the pattern
+/// is retried as a regular expression. This means simple substring patterns
+/// like `/monitors` work without escaping, while callers can also supply full
+/// regex patterns like `r'/monitors/\d+'`.
+///
+/// [status] is the synthesized HTTP status code.
+/// [body] is the raw response body string (JSON or otherwise).
+/// [headers] are additional response headers returned to the caller.
+final class MockRule {
+  /// Creates a [MockRule].
+  const MockRule({
+    required this.pattern,
+    required this.status,
+    required this.body,
+    this.headers = const {},
+  });
+
+  /// URL substring or regex pattern that triggers this rule.
+  final String pattern;
+
+  /// Synthesized HTTP status code.
+  final int status;
+
+  /// Raw response body (JSON string or other text).
+  final String body;
+
+  /// Extra response headers included in the synthesized [MagicResponse].
+  final Map<String, String> headers;
+
+  /// Returns true when [url] matches this rule's [pattern].
+  ///
+  /// Match order:
+  /// 1. Substring containment (fast path for simple patterns).
+  /// 2. Full-string [RegExp] match when substring check fails.
+  bool matches(String url) {
+    if (url.contains(pattern)) return true;
+    try {
+      return RegExp(pattern).hasMatch(url);
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
 /// Auto-collecting HTTP interceptor for the V3 ai_test_flutter plugin.
 ///
 /// Captures every request/response pair into a ring buffer (max 50 entries)
 /// so the `ext.aitest.network_requests` VM Service extension (Step 12) can
 /// serve the recent network history to the LLM agent without any additional
 /// infrastructure.
+///
+/// ## Mock rules
+///
+/// The `ext.aitest.mock_http` VM Service extension (Step 13) registers mock
+/// rules via [addMockRule]. During [onRequest], rules are checked in LIFO
+/// order (last-registered wins). When a rule matches the request URL, a
+/// synthesized [MagicResponse] is returned immediately, short-circuiting
+/// the network.
+///
+/// Rules are held in a static [List] scoped to the Dart isolate. They are
+/// cleared automatically on hot-restart because Dart statics reset when
+/// `main()` re-runs. Call [clearMockRules] for explicit test cleanup.
 ///
 /// ## Registration
 ///
@@ -28,8 +87,9 @@ import 'package:magic/magic.dart';
 ///
 /// ## Thread safety
 ///
-/// The ring buffer is not `synchronized`. All VM Service extension calls
-/// arrive on the root isolate, so no cross-isolate mutation occurs.
+/// The ring buffer and mock-rule list are not `synchronized`. All VM Service
+/// extension calls arrive on the root isolate, so no cross-isolate mutation
+/// occurs.
 class AiTestHttpInterceptor extends MagicNetworkInterceptor {
   AiTestHttpInterceptor._();
 
@@ -41,6 +101,51 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
 
   /// The singleton interceptor instance.
   static AiTestHttpInterceptor get instance => _instance;
+
+  // ---------------------------------------------------------------------------
+  // Mock rules
+  // ---------------------------------------------------------------------------
+
+  /// Active mock rules, stored in insertion order.
+  ///
+  /// [onRequest] iterates from the end (LIFO) so the last-registered rule
+  /// wins when multiple rules match the same URL.
+  static final List<MockRule> _mockRules = [];
+
+  /// Appends a mock rule from the supplied [rule] map.
+  ///
+  /// Required keys:
+  /// - `'pattern'` (String) — URL substring or regex.
+  /// - `'status'` (int) — HTTP status code for the synthesized response.
+  /// - `'body'` (String) — raw response body.
+  ///
+  /// Optional keys:
+  /// - `'contentType'` (String) — included as `content-type` response header.
+  /// - `'headers'` (`Map<String, String>`) — extra response headers.
+  static void addMockRule(Map<String, dynamic> rule) {
+    final pattern = rule['pattern'] as String;
+    final status = rule['status'] as int;
+    final body = (rule['body'] as String?) ?? '';
+
+    final Map<String, String> headers = {};
+    if (rule['contentType'] is String) {
+      headers['content-type'] = rule['contentType'] as String;
+    }
+    if (rule['headers'] is Map) {
+      (rule['headers'] as Map).forEach((k, v) {
+        headers[k.toString()] = v.toString();
+      });
+    }
+
+    _mockRules.add(MockRule(
+        pattern: pattern, status: status, body: body, headers: headers));
+  }
+
+  /// Removes all registered mock rules.
+  ///
+  /// Call this in test teardowns to return the interceptor to pass-through
+  /// mode. Hot-restart clears rules automatically (Dart statics reset).
+  static void clearMockRules() => _mockRules.clear();
 
   // ---------------------------------------------------------------------------
   // Ring buffer
@@ -100,7 +205,30 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
 
   @override
   dynamic onRequest(MagicRequest request) {
-    // Record the request start time keyed by a composite identifier.
+    // 1. Check mock rules in LIFO order — last-registered rule wins.
+    //    A matching rule short-circuits the network by returning a synthesized
+    //    MagicResponse. The DioNetworkDriver's InterceptorsWrapper only calls
+    //    handler.next when onRequest returns a MagicRequest; any other type
+    //    causes the wrapper to skip handler.next, so returning MagicResponse
+    //    here signals the short-circuit to callers that inspect the result
+    //    directly (e.g., tests and the DioNetworkDriver's mock-aware wrapper).
+    for (var i = _mockRules.length - 1; i >= 0; i--) {
+      final rule = _mockRules[i];
+      if (rule.matches(request.url)) {
+        developer.log(
+          '[ai-test-v3] mock_http matched "${rule.pattern}" → ${rule.status}',
+          name: 'ai-test',
+        );
+        return MagicResponse(
+          data: rule.body,
+          statusCode: rule.status,
+          headers: rule.headers,
+          message: null,
+        );
+      }
+    }
+
+    // 2. No rule matched — record the request start time and let it proceed.
     _pending['${request.method}:${request.url}'] = DateTime.now();
     return request;
   }
@@ -207,12 +335,14 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
 
   /// Resets internal state for use in tests.
   ///
-  /// Clears the ring buffer, pending map, and [_registered] flag so tests
-  /// start from a clean slate. Must NOT be called from production code.
+  /// Clears the ring buffer, pending map, mock rules, and [_registered] flag
+  /// so tests start from a clean slate. Must NOT be called from production
+  /// code.
   // ignore_for_testing
   static void resetForTesting() {
     _instance._buffer.clear();
     _instance._pending.clear();
+    _mockRules.clear();
     _registered = false;
   }
 }
