@@ -13,22 +13,38 @@ import { registerNetworkTools } from './tools/network.js';
 const DEFAULT_VM_SERVICE_URI = 'ws://127.0.0.1:8181/ws';
 
 /**
- * Path the launch script (`scripts/dev-with-aitest.sh`) writes the live VM
- * Service URI to. Flutter web ignores `--vm-service-port` + `--disable-service-
- * auth-codes` and picks a random port with a per-launch auth token, so the URI
- * cannot be hardcoded. Discovery order: file > env > default.
+ * Path the V3 CLI (`dart run ai_test_flutter:ai_test_flutter start`) writes
+ * the live state file to. Contains JSON with `vmServiceUri` + `pid` + `webPort`
+ * + `startedAt`. Flutter web ignores `--vm-service-port` and picks a random
+ * port with a per-launch auth token, so the URI cannot be hardcoded.
+ * Discovery order: state.json > legacy /tmp file > env > default.
  */
-const VM_URI_FILE = '/tmp/ai-test-vm-uri';
+const STATE_JSON_PATH = `${process.env.HOME ?? ''}/.ai-test/state.json`;
+const LEGACY_VM_URI_FILE = '/tmp/ai-test-vm-uri';
 
 /**
- * Resolve the VM Service URI. Lazy: re-reads the discovery file on every call
- * so the URI tracks Flutter app restarts without restarting the MCP server.
- * Falls back to env, then the default endpoint.
+ * Resolve the VM Service URI. Lazy: re-reads the state file on every call so
+ * the URI tracks Flutter app restarts without restarting the MCP server.
+ * Falls back to a legacy `/tmp/ai-test-vm-uri` (pre-CLI), then env, then the
+ * default endpoint.
  */
 function resolveVmServiceUri(): string {
+    // 1. V3 path: ~/.ai-test/state.json with {vmServiceUri: ...}.
     try {
-        if (existsSync(VM_URI_FILE)) {
-            const fromFile = readFileSync(VM_URI_FILE, 'utf8').trim();
+        if (existsSync(STATE_JSON_PATH)) {
+            const raw = readFileSync(STATE_JSON_PATH, 'utf8');
+            const state = JSON.parse(raw) as { vmServiceUri?: string };
+            if (typeof state.vmServiceUri === 'string' && state.vmServiceUri.length > 0) {
+                return state.vmServiceUri;
+            }
+        }
+    } catch {
+        // ignore; fall through to legacy
+    }
+    // 2. Legacy V2 path retained for backward compatibility.
+    try {
+        if (existsSync(LEGACY_VM_URI_FILE)) {
+            const fromFile = readFileSync(LEGACY_VM_URI_FILE, 'utf8').trim();
             if (fromFile.length > 0) return fromFile;
         }
     } catch {

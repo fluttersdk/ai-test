@@ -80,7 +80,7 @@ Add to your MCP client config (Claude Desktop, Cursor, etc.):
 }
 ```
 
-The server reads the VM Service URI from `~/.ai-test/state.json` (written by the `ai_test_flutter` CLI's `start` command). If absent, falls back to `AI_TEST_VM_SERVICE_URI` env var, otherwise defaults to `ws://127.0.0.1:8181/ws`.
+The server reads the VM Service URI from `~/.ai-test/state.json` (written by the `ai_test_flutter` CLI's `start` command — parses the `vmServiceUri` field). If absent, falls back to the legacy `/tmp/ai-test-vm-uri` file (V2 hand-off), then `AI_TEST_VM_SERVICE_URI` env var, then defaults to `ws://127.0.0.1:8181/ws`.
 
 ## Operator workflow
 
