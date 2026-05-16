@@ -4,6 +4,7 @@ import 'dart:developer' as developer;
 import 'package:flutter/widgets.dart';
 import 'package:magic/magic.dart';
 
+import 'ext_modal_router.dart';
 import 'v3_register.dart';
 
 /// Registers the navigation VM Service extensions for the V3 ai_test plugin.
@@ -105,15 +106,19 @@ Future<developer.ServiceExtensionResponse> aiTestNavigateHandler(
       );
     }
 
-    // 1. Perform navigation via the Magic facade — context-free, safe from
+    // 1. Dismiss any open modal routes (bottom sheets, dialogs) so the new
+    //    page renders cleanly without stuck overlays (D3 fix).
+    await dismissAllModals();
+
+    // 2. Perform navigation via the Magic facade — context-free, safe from
     //    extension handlers.
     MagicRoute.to(route);
 
-    // 2. Wait for the post-navigation paint phase to settle.
+    // 3. Wait for the post-navigation paint phase to settle.
     await WidgetsBinding.instance.endOfFrame;
     await WidgetsBinding.instance.endOfFrame;
 
-    // 3. Return confirmation so the MCP tool can assert navigation happened.
+    // 4. Return confirmation so the MCP tool can assert navigation happened.
     return developer.ServiceExtensionResponse.result(
       jsonEncode(buildNavigateResponse(route)),
     );

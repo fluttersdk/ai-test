@@ -1,4 +1,5 @@
 import 'ext_mock_http.dart';
+import 'ext_modal_router.dart';
 import 'ext_navigation.dart';
 import 'ext_network_console.dart';
 import 'ext_pointer.dart';
@@ -7,6 +8,7 @@ import 'ext_scroll.dart';
 import 'ext_snapshot.dart';
 import 'ext_text_input.dart';
 import 'ext_wait_find.dart';
+import 'v3_register.dart';
 
 /// Registers every `ext.aitest.*` extension owned by the V3 ai_test plugin.
 ///
@@ -45,6 +47,17 @@ void registerAllAiTestExtensions() {
 
   // 9. Wait + find: wait_for + find_by_text + find_by_label.
   registerWaitFindExtensions();
+
+  // 9b. Wait-for-request: subscribe-or-scan over the HTTP ring buffer so
+  //     agents can synchronise on a specific endpoint without polling the
+  //     network console.
+  registerExtensionIdempotent(
+    'ext.aitest.wait_for_request',
+    aiTestWaitForRequestHandler,
+  );
+
+  // 10. Modal router: dismiss_modals handler.
+  registerModalRouterExtension();
 }
 
 /// Resets any extension state for testing.

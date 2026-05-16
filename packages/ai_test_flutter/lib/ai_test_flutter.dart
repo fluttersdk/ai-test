@@ -7,6 +7,7 @@ export 'src/ai_test_http_interceptor.dart';
 export 'src/ai_test_log_sink.dart';
 export 'src/binding.dart';
 export 'src/ext_mock_http.dart';
+export 'src/ext_modal_router.dart';
 export 'src/ext_navigation.dart';
 export 'src/ext_network_console.dart';
 export 'src/ext_pointer.dart';

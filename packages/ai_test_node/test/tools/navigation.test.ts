@@ -101,7 +101,7 @@ async function bootNavigationServer(vmClient: LazyVmClient): Promise<{
 }
 
 describe('registerNavigationTools()', () => {
-    it('registers exactly 5 navigation + lifecycle tools', async () => {
+    it('registers exactly 6 navigation + lifecycle tools', async () => {
         const fake = makeFakeVmClient({});
         const { client, cleanup } = await bootNavigationServer(fake.client);
         try {
@@ -110,6 +110,7 @@ describe('registerNavigationTools()', () => {
             expect(names).toEqual(
                 [
                     'flutter_close_app',
+                    'flutter_dismiss_modals',
                     'flutter_get_routes',
                     'flutter_navigate',
                     'flutter_navigate_back',
@@ -320,6 +321,53 @@ describe('registerNavigationTools()', () => {
                 }>;
                 expect(content[0]?.text).toContain('Input validation error');
                 expect(content[0]?.text).not.toContain('not yet implemented');
+            } finally {
+                await cleanup();
+            }
+        });
+    });
+
+    describe('flutter_dismiss_modals', () => {
+        it('calls ext.aitest.dismiss_modals with {isolateId} and returns {popped: N}', async () => {
+            const fake = makeFakeVmClient({
+                'ext.aitest.dismiss_modals': { popped: 1 },
+            });
+            const { client, cleanup } = await bootNavigationServer(fake.client);
+            try {
+                const result = await client.callTool({
+                    name: 'flutter_dismiss_modals',
+                    arguments: {},
+                });
+                expect(result.isError).toBeFalsy();
+                const content = result.content as ReadonlyArray<{ type: string; text: string }>;
+                expect(JSON.parse(content[0]!.text)).toEqual({ popped: 1 });
+                expect(fake.calls).toEqual([
+                    {
+                        method: 'ext.aitest.dismiss_modals',
+                        params: { isolateId: 'isolates/main-1' },
+                    },
+                ]);
+            } finally {
+                await cleanup();
+            }
+        });
+
+        it('wraps VM Service failures as an isError envelope', async () => {
+            const erroringClient: LazyVmClient = {
+                ...makeFakeVmClient({}).client,
+                call: async <T>(): Promise<T> => {
+                    throw new Error('dismiss failed');
+                },
+            };
+            const { client, cleanup } = await bootNavigationServer(erroringClient);
+            try {
+                const result = await client.callTool({
+                    name: 'flutter_dismiss_modals',
+                    arguments: {},
+                });
+                expect(result.isError).toBe(true);
+                const content = result.content as ReadonlyArray<{ type: string; text: string }>;
+                expect(content[0]?.text).toContain('dismiss failed');
             } finally {
                 await cleanup();
             }

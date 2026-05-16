@@ -89,6 +89,7 @@ export function registerNavigationTools(
     registerFlutterGetRoutes(server, vmClient);
     registerFlutterCloseApp(server, vmClient);
     registerFlutterResize(server);
+    registerFlutterDismissModals(server, vmClient);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +227,45 @@ function registerFlutterCloseApp(
                 return ok({ closed: true });
             } catch (err) {
                 return fail(`flutter_close_app: ${describeError(err)}`);
+            }
+        },
+    );
+}
+
+/**
+ * `flutter_dismiss_modals()` → `ext.aitest.dismiss_modals({isolateId})`.
+ *
+ * Pops all modal routes (bottom sheets, dialogs, popups) sitting above the
+ * current page route in the Flutter Navigator without disturbing the page
+ * navigation stack. Returns `{popped: N}` — the count of routes removed.
+ *
+ * Use this when a modal is stuck on screen and subsequent navigation or
+ * interaction tools fail because the overlay intercepts pointer events.
+ * Note: `flutter_navigate` calls this automatically before pushing a new
+ * route (D3 auto-dismiss), so explicit calls are only needed when you want
+ * to dismiss modals without navigating away.
+ */
+function registerFlutterDismissModals(
+    server: McpServer,
+    vmClient: NavigationVmClient,
+): void {
+    server.registerTool(
+        'flutter_dismiss_modals',
+        {
+            description:
+                'Pop all open modal routes (bottom sheets, dialogs) above the current page route. Returns {popped: N}. flutter_navigate already calls this automatically; use this tool only when you need to dismiss modals without navigating.',
+            inputSchema: {},
+        },
+        async (): Promise<CallToolResult> => {
+            try {
+                const isolateId = await vmClient.getMainIsolateId();
+                const result = await vmClient.call<unknown>(
+                    'ext.aitest.dismiss_modals',
+                    { isolateId },
+                );
+                return ok(result);
+            } catch (err) {
+                return fail(`flutter_dismiss_modals: ${describeError(err)}`);
             }
         },
     );
