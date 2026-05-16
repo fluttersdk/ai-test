@@ -165,6 +165,12 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
 
   static bool _registered = false;
 
+  /// Whether the interceptor has been successfully wired into Magic's Dio
+  /// driver. Exposed so the V3 install pump can stop retrying once
+  /// registration lands (Magic.bound('network') may flip from false to true
+  /// between install() and Magic.init() completion).
+  static bool get isRegistered => _registered;
+
   /// Registers the interceptor with Magic's NetworkDriver.
   ///
   /// Idempotent: a second call is a silent no-op.
@@ -176,10 +182,13 @@ class AiTestHttpInterceptor extends MagicNetworkInterceptor {
     if (!Magic.bound('network')) {
       developer.log(
         '[ai-test-v3] AiTestHttpInterceptor: Magic network driver not bound '
-        '— skipping interceptor registration.',
+        '— deferring; call register() again after Magic.init() completes.',
         name: 'ai-test',
       );
-      _registered = true;
+      // Do NOT set _registered: allow the next install()/AppBooted callback
+      // to retry once Magic has registered the network service. Otherwise we
+      // silently no-op forever (production bug: install() runs before
+      // Magic.init() in lib/main.dart so the first attempt always fails).
       return;
     }
 
