@@ -142,30 +142,18 @@ Future<developer.ServiceExtensionResponse> aiTestTapHandler(
       );
     }
 
-    // 1. Inject pointer events at the widget's logical-pixel center. Works
-    //    for the majority of GestureDetector / InkWell targets but can miss
-    //    when the target lives under a Stack/Positioned sticky bar where the
-    //    Material splash overlay swallows the hit, or when the widget rebuilds
-    //    inside an AnimatedBuilder between pointer-down and pointer-up.
+    // 1. Inject pointer events at the widget's logical-pixel center.
+    //    `WidgetsBinding.instance.handlePointerEvent` (inside `_injectTap`)
+    //    runs `hitTestInView` on the render tree, caches the hit-test path
+    //    keyed by pointer id, and on PointerUp sweeps the gesture arena —
+    //    firing whichever recognizer wins. This is the same dispatch
+    //    `WidgetTester.tap` uses and reaches ancestor recognizers
+    //    (GestureDetector, InkResponse, ButtonStyleButton) regardless of
+    //    which descendant element the snapshot ref points at. No
+    //    widget-tree fallback is needed; see D2 group in ext_pointer_test.dart.
     await _injectTap(entry.rect.center);
 
-    // 2. Defensive fallback — when the widget is NOT a text field AND
-    //    exposes a public `onTap` / `onPressed` callback, invoke it directly.
-    //    This guarantees the tap intent reaches the widget even when canvas-
-    //    level pointer dispatch fails (sticky bars, AnimatedBuilder rebuilds,
-    //    Wind W* wrappers, Material splash overlay interception). Skipped for
-    //    text fields because the focus pathway below is the only thing that
-    //    should run there.
-    //
-    //    Idempotent buttons are the norm in this codebase; the worst case is
-    //    a single double-fire that the controller's `_isSubmitting` guard
-    //    already swallows.
-    if (!entry.isTextField) {
-      _invokeTapCallback(entry.element);
-      await WidgetsBinding.instance.endOfFrame;
-    }
-
-    // 3. For text-field refs, grant keyboard focus so IME state is consistent.
+    // 2. For text-field refs, grant keyboard focus so IME state is consistent.
     //    Walk descendants of the stored element to find the EditableTextState,
     //    then call requestKeyboard() on it (spike-confirmed: wave-1-spike.md
     //    finding #2). There is no static EditableText.of() factory; we do the
@@ -407,64 +395,4 @@ void registerPointerExtensions() {
   registerExtensionIdempotent('ext.aitest.tap', aiTestTapHandler);
   registerExtensionIdempotent('ext.aitest.hover', aiTestHoverHandler);
   registerExtensionIdempotent('ext.aitest.drag', aiTestDragHandler);
-}
-
-// ---------------------------------------------------------------------------
-// Tap-callback fallback
-// ---------------------------------------------------------------------------
-
-/// Best-effort direct invocation of a widget's tap callback when canvas-level
-/// pointer dispatch fails to reach it (sticky bars, AnimatedBuilder rebuilds,
-/// Wind / Material wrapped buttons with overlay splash interception).
-///
-/// Walks the widget's own properties + its subtree looking for the first
-/// public `onTap` / `onPressed` callback that has the type
-/// `VoidCallback` or `void Function()` or `Future<void> Function()`. Invokes
-/// it. Silently no-ops when no such callback is found (target was a text
-/// field, container, or other non-tappable widget) so the helper is safe to
-/// call defensively on every [aiTestTapHandler] invocation.
-void _invokeTapCallback(Element root) {
-  Function? found;
-
-  // 1. Inspect the root widget itself + its descendant widgets for an onTap
-  //    or onPressed property. Stops at the first hit.
-  void scanWidget(Widget widget) {
-    if (found != null) return;
-    final dyn = widget as dynamic;
-    for (final String prop in const <String>['onTap', 'onPressed']) {
-      try {
-        final cb = (prop == 'onTap') ? dyn.onTap : dyn.onPressed;
-        if (cb is Function) {
-          found = cb;
-          return;
-        }
-      } catch (_) {
-        // Widget has no such property — try the next.
-      }
-    }
-  }
-
-  scanWidget(root.widget);
-  if (found == null) {
-    root.visitChildren((Element child) {
-      if (found != null) return;
-      scanWidget(child.widget);
-      if (found == null) {
-        child.visitChildren((Element grand) {
-          if (found != null) return;
-          scanWidget(grand.widget);
-        });
-      }
-    });
-  }
-
-  if (found == null) return;
-  try {
-    found!();
-  } catch (e) {
-    developer.log(
-      '[ai-test-v3] ext.aitest.tap: tap-callback fallback threw $e',
-      name: 'ai-test',
-    );
-  }
 }

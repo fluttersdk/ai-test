@@ -398,6 +398,195 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // D2 — gesture-binding hit-test reaches ancestor handlers
+  // ---------------------------------------------------------------------------
+  //
+  // The DEFECT-6 root cause: snapshot refs frequently anchor on a semantic
+  // leaf (a Text label, an Icon) while the actual tap handler sits on a
+  // GestureDetector / InkWell / Material button ancestor. The V0/V1 fallback
+  // (`_invokeTapCallback`) climbed the widget tree to invoke `onTap` /
+  // `onPressed` directly because we suspected `_injectTap` would miss the
+  // ancestor. These tests prove the suspicion was wrong: Flutter's gesture
+  // binding hit-tests via the RENDER tree, finds the ancestor
+  // RenderSemanticsGestureHandler regardless of which descendant element the
+  // ref points at, and fires the recognizer. The fallback is unnecessary.
+
+  group('ext.aitest.tap — D2 hit-test ancestor reach', () {
+    testWidgets('reaches ancestor GestureDetector when ref is a leaf child',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      var counter = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: GestureDetector(
+                onTap: () => counter++,
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(Icons.check, key: ValueKey('leaf-icon')),
+                    SizedBox(width: 8),
+                    Text('X', key: ValueKey('leaf-text')),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // 1. Register the LEAF Text element (not the GestureDetector). Its rect
+      //    sits inside the GestureDetector's hit region, so gesture-binding
+      //    hit-test must still route the Down/Up pair to the ancestor.
+      final leafElement =
+          tester.element(find.byKey(const ValueKey('leaf-text')));
+      final leafBox = leafElement.findRenderObject()! as RenderBox;
+      final leafRect = leafBox.localToGlobal(Offset.zero) & leafBox.size;
+
+      final ref = RefRegistry.registerForTesting(
+        rect: leafRect,
+        element: leafElement,
+        groupId: 'test-d2-nested',
+        isTextField: false,
+      );
+
+      // 2. Drive the handler.
+      final future = aiTestTapHandler(
+        'ext.aitest.tap',
+        <String, String>{'ref': ref},
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump();
+      await tester.pump();
+      final response = await future;
+
+      // 3. The GestureDetector ancestor MUST have received the tap exactly
+      //    once via gesture binding (no fallback, no double-fire).
+      expect(counter, equals(1),
+          reason:
+              'gesture binding must route the leaf-rect tap to the ancestor '
+              'GestureDetector exactly once (no fallback double-fire)');
+      expect(response.errorCode, isNull);
+      final body = jsonDecode(response.result!) as Map<String, dynamic>;
+      expect(body['ref'], equals(ref));
+    });
+
+    testWidgets('returns OK on widgets without an onTap handler',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 300,
+                child: ListTile(
+                  key: ValueKey('inert-tile'),
+                  title: Text('Just a label'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // 1. Register the ListTile element. There is no onTap; tapping should
+      //    be a silent no-op (handler returns OK, no exception, no side
+      //    effects). This guards against false positives from any future
+      //    fallback regression.
+      final element = tester.element(find.byKey(const ValueKey('inert-tile')));
+      final box = element.findRenderObject()! as RenderBox;
+      final rect = box.localToGlobal(Offset.zero) & box.size;
+
+      final ref = RefRegistry.registerForTesting(
+        rect: rect,
+        element: element,
+        groupId: 'test-d2-inert',
+        isTextField: false,
+      );
+
+      final future = aiTestTapHandler(
+        'ext.aitest.tap',
+        <String, String>{'ref': ref},
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump();
+      await tester.pump();
+      final response = await future;
+
+      // 2. Handler succeeded — no exception, OK envelope, ref echoed back.
+      expect(response.errorCode, isNull,
+          reason: 'inert widgets must not produce an error envelope');
+      final body = jsonDecode(response.result!) as Map<String, dynamic>;
+      expect(body['ref'], equals(ref));
+    });
+
+    testWidgets('reaches MaterialButton onPressed via gesture binding',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      var counter = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () => counter++,
+                child: const Text('Press me', key: ValueKey('btn-label')),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // 1. Register the BUTTON LABEL leaf (not the button itself) — the
+      //    canonical DEFECT-6 shape where the semantic node points at the
+      //    text inside a button.
+      final labelElement =
+          tester.element(find.byKey(const ValueKey('btn-label')));
+      final labelBox = labelElement.findRenderObject()! as RenderBox;
+      final labelRect = labelBox.localToGlobal(Offset.zero) & labelBox.size;
+
+      final ref = RefRegistry.registerForTesting(
+        rect: labelRect,
+        element: labelElement,
+        groupId: 'test-d2-elevated',
+        isTextField: false,
+      );
+
+      final future = aiTestTapHandler(
+        'ext.aitest.tap',
+        <String, String>{'ref': ref},
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump();
+      await tester.pump();
+      final response = await future;
+
+      // 2. onPressed must fire exactly once — gesture binding routes the
+      //    pointer events through InkResponse / Material splash to the
+      //    button's TapGestureRecognizer.
+      expect(counter, equals(1),
+          reason: 'gesture binding must route the label-rect tap to the '
+              'ElevatedButton.onPressed exactly once');
+      expect(response.errorCode, isNull);
+      final body = jsonDecode(response.result!) as Map<String, dynamic>;
+      expect(body['ref'], equals(ref));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // registerPointerExtensions — self-registration
   // ---------------------------------------------------------------------------
 
