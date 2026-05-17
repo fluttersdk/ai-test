@@ -84,21 +84,23 @@ async function bootServerWithSnapshotTools(
 }
 
 describe('registerSnapshotTools()', () => {
-    it('registers all 4 tools (snapshot, screenshot, evaluate, wait_for)', async () => {
-        const { client, cleanup } = await bootServerWithSnapshotTools(() => ({}));
-        try {
-            const { tools } = await client.listTools();
-            const names = tools.map((t) => t.name).sort();
-            expect(names).toEqual([
-                'flutter_evaluate',
-                'flutter_screenshot',
-                'flutter_snapshot',
-                'flutter_wait_for',
-            ]);
-        } finally {
-            await cleanup();
-        }
-    });
+    it('registers all 5 tools (snapshot, screenshot, evaluate, wait_for, wait_for_request)',
+        async () => {
+            const { client, cleanup } = await bootServerWithSnapshotTools(() => ({}));
+            try {
+                const { tools } = await client.listTools();
+                const names = tools.map((t) => t.name).sort();
+                expect(names).toEqual([
+                    'flutter_evaluate',
+                    'flutter_screenshot',
+                    'flutter_snapshot',
+                    'flutter_wait_for',
+                    'flutter_wait_for_request',
+                ]);
+            } finally {
+                await cleanup();
+            }
+        });
 
     describe('flutter_snapshot', () => {
         it('calls ext.aitest.snapshot and returns YAML text content', async () => {
@@ -543,11 +545,21 @@ describe('registerSnapshotTools()', () => {
         });
     });
 
-    describe('isolate caching', () => {
-        it('resolves the main isolate id once and reuses it across calls', async () => {
-            // getMainIsolateId is on the LazyVmClient interface (not via call()),
-            // so spy on it directly. registerSnapshotTools wraps the client in a
-            // ToolContext that caches the result under closure.
+    describe('isolate lookup', () => {
+        it('always delegates to the live vmClient so device-target switches stay in sync',
+            async () => {
+            // The previous implementation cached the first isolate id under
+            // closure forever. After a device-target switch (chrome → macos),
+            // the lazy wrapper in server.ts rebuilds the underlying VM client
+            // against the new state.json URI, but the stale tool-context
+            // cache still pointed at the dead chrome isolate — every
+            // downstream ext.aitest.* call then failed with VM Service
+            // "Invalid params" because that isolate no longer existed.
+            //
+            // The fix is to always read the isolate id from the live client.
+            // The lookup itself is one local-WebSocket `getVM` RPC, sub-ms on
+            // Flutter web, low-ms on USB/wireless mobile — the trade is
+            // correctness across device sessions for negligible per-call cost.
             const calls: CallRecord[] = [];
             let isolateLookupCount = 0;
             const fakeClient: LazyVmClient = {
@@ -588,7 +600,9 @@ describe('registerSnapshotTools()', () => {
                 await client.callTool({ name: 'flutter_snapshot', arguments: {} });
                 await client.callTool({ name: 'flutter_snapshot', arguments: {} });
                 await client.callTool({ name: 'flutter_snapshot', arguments: {} });
-                expect(isolateLookupCount).toBe(1);
+                // Every tool call must consult the live vmClient — proves no
+                // stale closure-level cache shadows the underlying lookup.
+                expect(isolateLookupCount).toBe(3);
                 expect(calls).toHaveLength(3);
             } finally {
                 await client.close();

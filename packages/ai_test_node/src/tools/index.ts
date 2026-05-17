@@ -65,20 +65,25 @@ export interface ToolDefinition<TInput> {
 /**
  * Build a `ToolContext` backed by the live `VmServiceClient` (or any object
  * implementing the same surface, e.g. the `LazyVmClient` proxy from
- * `server.ts`). Caches the main isolate id under closure so the per-server
- * lookup happens at most once per process lifetime.
+ * `server.ts`). Always delegates `getIsolateId` to the live client; the lazy
+ * wrapper in `server.ts` rebuilds the underlying client whenever state.json's
+ * vmServiceUri changes (device-target switch: chrome → macos, hot-restart on
+ * the same target, etc.), and a stale closure-level cache here would point
+ * every downstream `ext.aitest.*` call at the dead isolate and produce VM
+ * Service `Invalid params` errors.
  *
- * Wave 6 tool wrappers will receive a context produced by this helper.
+ * The underlying `getMainIsolateId` is a single local-WebSocket `getVM` RPC
+ * (sub-millisecond on Flutter web, low milliseconds on USB/wireless mobile);
+ * skipping the cache trades nothing meaningful for correctness across device
+ * sessions. The lower `VmServiceClient` keeps its own per-isolate caches
+ * (e.g. `getRootLibId`) that survive across calls within one VM session.
  */
 export function makeToolContext(
     vmClient: Pick<VmServiceClient, 'getMainIsolateId' | 'getRootLibId' | 'call'>,
 ): ToolContext {
-    let cachedIsolateId: string | null = null;
     return {
-        async getIsolateId(): Promise<string> {
-            if (cachedIsolateId !== null) return cachedIsolateId;
-            cachedIsolateId = await vmClient.getMainIsolateId();
-            return cachedIsolateId;
+        getIsolateId(): Promise<string> {
+            return vmClient.getMainIsolateId();
         },
         getRootLibId(isolateId: string): Promise<string> {
             return vmClient.getRootLibId(isolateId);
