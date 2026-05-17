@@ -6,8 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'scenarios/checkbox_row.dart';
+import 'scenarios/dropdown_scenario.dart';
+import 'scenarios/log_emit_scenario.dart';
 import 'scenarios/modal_sheet.dart';
 import 'scenarios/network_form.dart';
+import 'scenarios/reorder_scenario.dart';
 import 'scenarios/wbutton_nested.dart';
 
 /// T2 fixture app entry point.
@@ -92,6 +95,9 @@ class AiTestExampleApp extends StatelessWidget {
         '/modal': (BuildContext context) => const ModalSheetScenario(),
         '/network': (BuildContext context) =>
             NetworkFormScenario(fetcher: networkFetcher),
+        '/dropdown': (BuildContext context) => const DropdownScenario(),
+        '/reorder': (BuildContext context) => const ReorderScenario(),
+        '/log-emit': (BuildContext context) => const LogEmitScenario(),
       },
     );
   }
@@ -124,6 +130,18 @@ class _IndexPage extends StatelessWidget {
           ListTile(
             title: const Text('Network form (D9)'),
             onTap: () => Navigator.of(context).pushNamed('/network'),
+          ),
+          ListTile(
+            title: const Text('Dropdown (select_option)'),
+            onTap: () => Navigator.of(context).pushNamed('/dropdown'),
+          ),
+          ListTile(
+            title: const Text('Reorder list (drag)'),
+            onTap: () => Navigator.of(context).pushNamed('/reorder'),
+          ),
+          ListTile(
+            title: const Text('Log emit (console_messages)'),
+            onTap: () => Navigator.of(context).pushNamed('/log-emit'),
           ),
         ],
       ),

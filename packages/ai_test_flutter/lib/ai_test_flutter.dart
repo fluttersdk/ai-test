@@ -12,6 +12,7 @@ export 'src/ext_navigation.dart';
 export 'src/ext_network_console.dart';
 export 'src/ext_pointer.dart';
 export 'src/ext_screenshot.dart';
+export 'src/ext_scroll.dart';
 export 'src/ext_snapshot.dart';
 export 'src/ext_text_input.dart';
 export 'src/ext_wait_find.dart';
