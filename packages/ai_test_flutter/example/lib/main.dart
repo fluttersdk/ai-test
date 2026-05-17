@@ -17,16 +17,25 @@ import 'scenarios/wbutton_nested.dart';
 ///
 /// Boots a minimal MaterialApp with named routes to four regression-guard
 /// scenarios (D2, DEFECT-6, D3 + D10, D9). The plugin is installed under the
-/// canonical `kIsWeb && kDebugMode` gate so the example app behaves the same
-/// way as the production uptizm-app wires it.
+/// canonical `kDebugMode` gate so the example app behaves the same way as
+/// the production uptizm-app wires it (and so the same fixture app drives
+/// the macOS / desktop / mobile smoke runs, not just chrome).
 ///
 /// Integration tests boot the app via [AiTestExampleApp] directly (skipping
 /// `runApp`) and override the [AiTestExampleApp.networkFetcher] so the D9
 /// scenario does not hit the public internet.
 void main() {
+  // Bindings init must precede install: AiTestPluginV3.install() calls
+  // RendererBinding.instance.ensureSemantics(), which throws if the binding
+  // is not yet up. Web tolerated the missing call by accident (its bootstrap
+  // initializes the binding before main runs); desktop / mobile crash hard
+  // without this line.
+  WidgetsFlutterBinding.ensureInitialized();
+
   // Same compile-time guard as uptizm-app/lib/main.dart. Release builds tree-
-  // shake the whole plugin install path.
-  if (kIsWeb && kDebugMode) {
+  // shake the whole plugin install path on every platform (dart2js for web,
+  // dart2native for desktop / mobile AOT).
+  if (kDebugMode) {
     AiTestPluginV3.install();
   }
 

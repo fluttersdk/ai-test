@@ -97,12 +97,15 @@ class StopCommand extends Command<void> {
       return;
     }
 
-    // 2. Extract PIDs. chromePid is nullable (legacy state or capture failure).
+    // 2. Extract PIDs. chromePid is nullable (legacy state, capture failure,
+    //    or a non-chrome device target where no Chrome process exists).
     final int flutterPid = state['pid'] as int;
     final int? chromePid = state['chromePid'] as int?;
     final String? tmpProfileDir = state['tmpProfileDir'] as String?;
+    final String device = (state['device'] as String?) ?? 'chrome';
+    final bool isChromeTarget = device == 'chrome';
 
-    if (chromePid == null) {
+    if (chromePid == null && isChromeTarget) {
       _stderr.writeln(
         'ai_test_flutter stop: no chromePid in state — GC degraded for this '
         'session. Chrome browser process may persist as orphan; clean up '

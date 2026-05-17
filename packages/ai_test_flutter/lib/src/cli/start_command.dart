@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:args/args.dart';
 import 'package:args/command_runner.dart';
+import 'package:meta/meta.dart';
 
 import 'state_file.dart';
 
@@ -129,15 +130,55 @@ class StartCommand extends Command<void> {
         negatable: true,
         help: 'Record profile=static in state.json (for serving a pre-built '
             'bundle rather than the dev server).',
+      )
+      ..addOption(
+        'device',
+        defaultsTo: 'chrome',
+        help: 'Flutter device target forwarded as `flutter run -d <device>`. '
+            'Defaults to chrome for back-compat. Pass macos / linux / windows '
+            'to launch a desktop binary, or a device id (iOS simulator UDID, '
+            'Android serial) to launch on a connected device. D6 reaper + '
+            'Chrome PID capture are auto-skipped on non-chrome targets.',
       );
   }
 
   /// Pattern matching the Flutter dev-server stdout line that exposes the VM
-  /// service WebSocket URI, e.g.
-  /// `Debug service listening on ws://127.0.0.1:8181/<token>/ws`.
+  /// service URI. Two variants appear in practice:
+  ///
+  /// - Web: `Debug service listening on ws://127.0.0.1:8181/TOKEN/ws`
+  /// - Desktop / mobile: `A Dart VM Service on PLATFORM is available at:
+  ///   http://127.0.0.1:PORT/TOKEN/`
+  ///
+  /// Both land in `match.group(1)`; [normalizeVmServiceUri] converts the
+  /// `http://.../TOKEN/` desktop form into the canonical `ws://.../TOKEN/ws`
+  /// form the MCP server's VmServiceClient expects.
   static final RegExp _uriPattern = RegExp(
-    r'Debug service listening on\s+(ws://\S+)',
+    r'(?:Debug service listening on|Dart VM Service on .+? is available at:?)'
+    r'\s+(\S+)',
   );
+
+  /// Normalizes a scraped VM Service URI to the `ws://host:port/<token>/ws`
+  /// form the MCP server's VmServiceClient connects with.
+  ///
+  /// - `ws://.../ws` (web): passes through unchanged.
+  /// - `http://.../<token>/` (desktop / mobile): protocol becomes `ws://`,
+  ///   append `ws` so the path ends in `/ws`.
+  /// - `https://` is rare but symmetric: becomes `wss://`.
+  ///
+  /// Exposed as `@visibleForTesting` so unit tests can pin both directions
+  /// without going through the file-poll scrape path.
+  @visibleForTesting
+  static String normalizeVmServiceUri(String raw) {
+    String uri = raw;
+    if (uri.startsWith('http://')) {
+      uri = 'ws://${uri.substring('http://'.length)}';
+    } else if (uri.startsWith('https://')) {
+      uri = 'wss://${uri.substring('https://'.length)}';
+    }
+    if (uri.endsWith('/ws')) return uri;
+    if (uri.endsWith('/ws/')) return uri.substring(0, uri.length - 1);
+    return uri.endsWith('/') ? '${uri}ws' : '$uri/ws';
+  }
 
   /// Extracts the `--user-data-dir=<path>` substring from a Chrome command
   /// line. Path stops at the next whitespace (Chrome never wraps paths in
@@ -189,15 +230,26 @@ class StartCommand extends Command<void> {
     );
     final bool ddsOn = (parsed?['dds'] as bool?) ?? false;
     final bool profileStatic = (parsed?['profile-static'] as bool?) ?? false;
+    final String device = (parsed?['device'] as String?) ?? 'chrome';
+    final bool isChromeTarget = device == 'chrome';
 
     // 1. D6 Layer 1 — pre-flight reaper. Non-fatal; failures are warnings only.
-    //    Skipped on Windows because `pgrep` is POSIX-only; document the
-    //    `taskkill /T /F` workaround for Windows operators.
+    //    Only meaningful for the chrome target (it kills orphan
+    //    flutter_tools_chrome_device processes + tmp profile dirs). Skipped on
+    //    Windows because `pgrep` is POSIX-only; document the `taskkill /T /F`
+    //    workaround for Windows operators. Skipped for non-chrome targets
+    //    (macos/linux/windows desktop, iOS, Android) because there is no
+    //    Chrome process tree to reap.
     if (Platform.isWindows) {
       stderr.writeln(
         'ai_test_flutter start: D6 reaper skipped on Windows. '
         'Clean orphan Chrome instances manually with '
         '`taskkill /T /F /IM chrome.exe` after a failed session.',
+      );
+    } else if (!isChromeTarget) {
+      stderr.writeln(
+        'ai_test_flutter start: D6 reaper skipped for device=$device '
+        '(only meaningful for chrome).',
       );
     } else {
       await _reapOrphans();
@@ -212,11 +264,13 @@ class StartCommand extends Command<void> {
     await logFile.writeAsString('');
 
     // 3. Build the launcher argv — Wave 1 amended set only.
+    //    `--web-port` is chrome-only (`flutter run -d macos --web-port=…`
+    //    rejects the flag), so omit it for non-chrome targets.
     final List<String> flutterArgs = <String>[
       'run',
       '-d',
-      'chrome',
-      '--web-port=$webPort',
+      device,
+      if (isChromeTarget) '--web-port=$webPort',
       if (!ddsOn) '--no-dds',
       '--dart-define=AI_TEST=1',
     ];
@@ -255,10 +309,11 @@ class StartCommand extends Command<void> {
 
     // 7. D6 Layer 2 — Chrome PID + tmpProfileDir capture. Best-effort; null
     //    fallbacks degrade the next StopCommand to flutter-only kill (with a
-    //    warning). Skipped on Windows.
+    //    warning). Skipped on Windows AND on non-chrome targets (no Chrome
+    //    child to capture).
     int? chromePid;
     String? tmpProfileDir;
-    if (!Platform.isWindows) {
+    if (!Platform.isWindows && isChromeTarget) {
       final _ChromeCapture capture = await _captureChrome(childPid);
       chromePid = capture.pid;
       tmpProfileDir = capture.tmpProfileDir;
@@ -273,9 +328,10 @@ class StartCommand extends Command<void> {
       'startedAt': DateTime.now().toUtc().toIso8601String(),
       'profile': profileStatic ? 'static' : 'debug',
       'projectRoot': Directory.current.path,
-      // D6: nullable fields land as JSON null when capture fails. The keys
-      // are always present so consumers can distinguish "capture failure"
-      // from "legacy state".
+      'device': device,
+      // D6: nullable fields land as JSON null when capture fails OR when the
+      // device is non-chrome. The keys are always present so consumers can
+      // distinguish "capture failure" from "legacy state".
       'chromePid': chromePid,
       'tmpProfileDir': tmpProfileDir,
     });
@@ -675,7 +731,7 @@ class StartCommand extends Command<void> {
           final String chunk = logFile.readAsStringSync();
           for (final String line in const LineSplitter().convert(chunk)) {
             final Match? match = _uriPattern.firstMatch(line);
-            if (match != null) return match.group(1)!;
+            if (match != null) return normalizeVmServiceUri(match.group(1)!);
           }
           lastSize = size;
         }

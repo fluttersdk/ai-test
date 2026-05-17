@@ -24,20 +24,18 @@ import 'v3_register.dart';
 /// `main.dart` calls [install] inside a compile-time guard:
 ///
 /// ```dart
-/// if (kIsWeb && kDebugMode) {
+/// if (kDebugMode) {
 ///   AiTestPluginV3.install();
 ///   runApp(
-///     RepaintBoundary(
-///       key: AiTestPluginV3.rootRepaintBoundaryKey,
-///       child: MagicApplication(...),
-///     ),
+///     RepaintBoundary(child: MyApp(...)),
 ///   );
 /// }
 /// ```
 ///
-/// The outer `kIsWeb && kDebugMode` guard lets `dart2js` tree-shake the
-/// entire V3 branch out of release bundles. Release builds emit zero V3
-/// bytes.
+/// `kDebugMode` is the only gate: dart2js (web) and dart2native (desktop /
+/// mobile AOT) both tree-shake the entire V3 branch out of release bundles
+/// when this constant is false. Release builds emit zero V3 bytes on every
+/// platform.
 ///
 /// ## Idempotency
 ///

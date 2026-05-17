@@ -433,6 +433,229 @@ void main() {
       }
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Cross-platform: --device flag selects launch target; D6 reaper + Chrome
+  // capture are only meaningful on the chrome target.
+  // ---------------------------------------------------------------------------
+  group('StartCommand --device cross-platform', () {
+    test('--device option is advertised with default "chrome"', () {
+      final CommandRunner<void> runner =
+          CommandRunner<void>('ai_test_flutter', 'test runner')
+            ..addCommand(StartCommand());
+
+      final String usage = runner.commands['start']!.usage;
+
+      expect(usage, contains('--device'));
+      expect(
+        usage,
+        contains('chrome'),
+        reason: 'default target stays chrome for back-compat',
+      );
+    });
+
+    test('--device=macos forwards -d macos to the wrapper', () async {
+      late String shellCmd;
+      _seedLogFile(
+        tempHome,
+        'Debug service listening on ws://127.0.0.1:8181/macos_tok/ws\n',
+      );
+      final _FakeProcess fake =
+          _FakeProcess.withPidLine(pidLine: '5151', pid: 1);
+
+      final StartCommand command = StartCommand(
+        processStart: (String executable, List<String> args,
+            {ProcessStartMode mode = ProcessStartMode.normal}) async {
+          shellCmd = args[1];
+          return fake;
+        },
+        processRun: _noopProcessRun,
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
+      );
+
+      await _runCommand(command, <String>['start', '--device=macos']);
+
+      expect(shellCmd, contains('nohup flutter run -d macos'));
+      expect(
+        shellCmd,
+        isNot(contains('-d chrome')),
+        reason: 'non-chrome target must not leak chrome in the argv',
+      );
+    });
+
+    test('--device=macos skips D6 reaper (no pgrep) and Chrome capture (null)',
+        () async {
+      final List<List<String>> runs = <List<String>>[];
+      _seedLogFile(
+        tempHome,
+        'Debug service listening on ws://127.0.0.1:8181/nogc_tok/ws\n',
+      );
+      final _FakeProcess fake =
+          _FakeProcess.withPidLine(pidLine: '6262', pid: 1);
+
+      final StartCommand command = StartCommand(
+        processStart: (String executable, List<String> args,
+                {ProcessStartMode mode = ProcessStartMode.normal}) async =>
+            fake,
+        processRun: (String exe, List<String> args,
+            {bool runInShell = false}) async {
+          runs.add(<String>[exe, ...args]);
+          return ProcessResult(0, 1, '', '');
+        },
+        killPid: (int pid, ProcessSignal signal) =>
+            fail('killPid must never fire when device is not chrome'),
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
+      );
+
+      await _runCommand(command, <String>['start', '--device=macos']);
+
+      expect(
+        runs.any((List<String> r) => r.first == 'pgrep'),
+        isFalse,
+        reason: 'no pgrep probe is meaningful on non-chrome targets',
+      );
+
+      final Map<String, dynamic> state = (await StateFile.read())!;
+      expect(state['device'], equals('macos'));
+      expect(state['chromePid'], isNull);
+      expect(state['tmpProfileDir'], isNull);
+    });
+
+    test('default (no --device) still wires -d chrome + reaper as today',
+        () async {
+      bool pgrepInvoked = false;
+      _seedLogFile(
+        tempHome,
+        'Debug service listening on ws://127.0.0.1:8181/default_tok/ws\n',
+      );
+      final _FakeProcess fake =
+          _FakeProcess.withPidLine(pidLine: '7373', pid: 1);
+
+      final StartCommand command = StartCommand(
+        processStart: (String executable, List<String> args,
+                {ProcessStartMode mode = ProcessStartMode.normal}) async =>
+            fake,
+        processRun: (String exe, List<String> args,
+            {bool runInShell = false}) async {
+          if (exe == 'pgrep') pgrepInvoked = true;
+          return ProcessResult(0, 1, '', '');
+        },
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
+      );
+
+      await _runCommand(command, <String>['start']);
+
+      expect(
+        pgrepInvoked,
+        isTrue,
+        reason: 'chrome target keeps the existing GC layers active',
+      );
+      final Map<String, dynamic> state = (await StateFile.read())!;
+      expect(state['device'], equals('chrome'));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // VM Service URI scrape: web prints `Debug service listening on ws://…`,
+  // desktop / mobile print `A Dart VM Service on <PLATFORM> is available at:
+  // http://…/<token>/`. StartCommand normalizes both into a `ws://…/ws`
+  // canonical form the MCP server's VmServiceClient connects to.
+  // ---------------------------------------------------------------------------
+  group('StartCommand VM Service URI scrape (cross-platform)', () {
+    test(
+        'desktop "Dart VM Service on macOS is available at: http://…/<token>/"'
+        ' is normalized to ws://…/<token>/ws', () async {
+      _seedLogFile(
+        tempHome,
+        'Launching lib/main.dart on macOS in debug mode...\n'
+        'A Dart VM Service on macOS is available at: '
+        'http://127.0.0.1:60451/3UuVpTGJvMo=/\n',
+      );
+      final _FakeProcess fake =
+          _FakeProcess.withPidLine(pidLine: '5151', pid: 1);
+
+      final StartCommand command = StartCommand(
+        processStart: (String executable, List<String> args,
+                {ProcessStartMode mode = ProcessStartMode.normal}) async =>
+            fake,
+        processRun: _noopProcessRun,
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
+      );
+
+      await _runCommand(command, <String>['start', '--device=macos']);
+
+      final Map<String, dynamic> state = (await StateFile.read())!;
+      expect(
+        state['vmServiceUri'],
+        equals('ws://127.0.0.1:60451/3UuVpTGJvMo=/ws'),
+        reason: 'http://…/<token>/ must become ws://…/<token>/ws',
+      );
+    });
+
+    test(
+        'mobile "Dart VM Service on iOS is available at: http://…/<token>/"'
+        ' (with trailing slash) normalizes too', () async {
+      _seedLogFile(
+        tempHome,
+        'A Dart VM Service on iOS is available at: '
+        'http://127.0.0.1:54321/abc123def=/\n',
+      );
+      final _FakeProcess fake =
+          _FakeProcess.withPidLine(pidLine: '6262', pid: 1);
+
+      final StartCommand command = StartCommand(
+        processStart: (String executable, List<String> args,
+                {ProcessStartMode mode = ProcessStartMode.normal}) async =>
+            fake,
+        processRun: _noopProcessRun,
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
+      );
+
+      await _runCommand(
+        command,
+        <String>['start', '--device=00000000-0000000000000000'],
+      );
+
+      final Map<String, dynamic> state = (await StateFile.read())!;
+      expect(
+        state['vmServiceUri'],
+        equals('ws://127.0.0.1:54321/abc123def=/ws'),
+      );
+    });
+
+    test('web "Debug service listening on ws://…/<token>/ws" passes through',
+        () async {
+      _seedLogFile(
+        tempHome,
+        'Debug service listening on ws://127.0.0.1:8181/already_ws_tok/ws\n',
+      );
+      final _FakeProcess fake =
+          _FakeProcess.withPidLine(pidLine: '7373', pid: 1);
+
+      final StartCommand command = StartCommand(
+        processStart: (String executable, List<String> args,
+                {ProcessStartMode mode = ProcessStartMode.normal}) async =>
+            fake,
+        processRun: _noopProcessRun,
+        tmpRootOverride: emptyTmpRoot.path,
+        chromeCaptureDelay: Duration.zero,
+      );
+
+      await _runCommand(command, <String>['start']);
+
+      final Map<String, dynamic> state = (await StateFile.read())!;
+      expect(
+        state['vmServiceUri'],
+        equals('ws://127.0.0.1:8181/already_ws_tok/ws'),
+        reason: 'already-normalized ws://…/ws form must not be double-suffixed',
+      );
+    });
+  });
 }
 
 /// Schedules a deferred write of `~/.ai-test/flutter-dev.log` under the temp
