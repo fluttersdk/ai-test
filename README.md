@@ -1,8 +1,8 @@
-# ai-test — Flutter Web LLM-Agent Control (V3)
+# ai-test — Flutter LLM-Agent Control (V3)
 
-> MCP-only single-channel via Dart VM Service custom extensions. No Playwright, no DOM mirror, no Shadow DOM projection.
+> MCP-only single-channel via Dart VM Service custom extensions. No Playwright, no DOM mirror, no Shadow DOM projection. **Cross-platform**: web (Chrome), macOS / Linux / Windows desktop, iOS / Android simulator + device.
 
-Two packages bridge a running Flutter web app to an LLM coding agent (Claude / Cursor / similar) so the agent can drive, inspect, and verify the app A-Z over a single MCP stdio surface.
+Two packages bridge a running Flutter app to an LLM coding agent (Claude / Cursor / similar) so the agent can drive, inspect, and verify the app A-Z over a single MCP stdio surface. Every interaction flows through the Dart VM Service, which is available on every Flutter target — web debug, desktop debug, and mobile debug all expose the same `ext.aitest.*` extension surface.
 
 | Package | Path | Role |
 |---|---|---|
@@ -18,7 +18,8 @@ agent (LLM, IDE)
 ai-test-mcp (TypeScript)
   │
   ▼  Dart VM Service Protocol (one WebSocket)
-flutter run -d chrome --no-dds --dart-define=AI_TEST=1
+flutter run -d <chrome|macos|linux|windows|ios|android> \
+  --no-dds --dart-define=AI_TEST=1
   │
   ▼  developer.registerExtension dispatch
 ai_test_flutter (Dart) ext.aitest.*
@@ -33,24 +34,30 @@ V0 / V1 / V2 attempted Shadow DOM projection / mirror DOM / native Semantics + P
 
 From the consumer Flutter app's repo (e.g. `uptizm-app/`):
 
-```bash
-# Wire-once in lib/main.dart inside `if (kIsWeb && kDebugMode)`:
-AiTestPluginV3.install();
-runApp(
-  RepaintBoundary(
-    key: AiTestPluginV3.rootRepaintBoundaryKey,
-    child: yourApp,
-  ),
-);
+```dart
+// Wire-once in lib/main.dart inside `if (kDebugMode)`:
+if (kDebugMode) {
+  AiTestPluginV3.install();
+}
+runApp(kDebugMode ? RepaintBoundary(child: yourApp) : yourApp);
+```
 
-# Then launch via the CLI:
-dart run ai_test_flutter:ai_test_flutter start    # boots flutter run -d chrome + writes ~/.ai-test/state.json
+```bash
+# Web (default — back-compat):
+dart run ai_test_flutter:ai_test_flutter start
+# Desktop:
+dart run ai_test_flutter:ai_test_flutter start --device=macos
+dart run ai_test_flutter:ai_test_flutter start --device=linux
+dart run ai_test_flutter:ai_test_flutter start --device=windows
+# Mobile (iOS simulator UDID or Android serial accepted as device id):
+dart run ai_test_flutter:ai_test_flutter start --device=<simulator-id>
+
 dart run ai_test_flutter:ai_test_flutter status   # JSON status
 dart run ai_test_flutter:ai_test_flutter doctor   # environment preflight
 dart run ai_test_flutter:ai_test_flutter stop     # SIGTERM + state.json delete
 ```
 
-The compile-time `kIsWeb && kDebugMode` outer guard lets dart2js prove the entire branch dead in release; production builds emit zero V3 bytes.
+The compile-time `kDebugMode` guard lets dart2js (web) and dart2native (desktop / mobile AOT) tree-shake the entire V3 branch out of release bundles on every platform. The D6 Chrome reaper + PID capture only fire when `--device=chrome` (default); other targets skip them because there is no Chrome process tree to clean up.
 
 ## State inspection
 

@@ -7,8 +7,10 @@ import { registerSnapshotTools } from './tools/snapshot.js';
 import { registerNetworkTools } from './tools/network.js';
 
 /**
- * Default VM Service WebSocket endpoint exposed by
- * `flutter run -d chrome --enable-vm-service --disable-service-auth-codes`.
+ * Default VM Service WebSocket endpoint exposed by `flutter run` debug
+ * sessions on any target (chrome/macos/linux/windows/ios/android). The MCP
+ * server is target-agnostic; it just speaks the VM Service Protocol over
+ * the WebSocket the CLI scraped into state.json.
  */
 const DEFAULT_VM_SERVICE_URI = 'ws://127.0.0.1:8181/ws';
 

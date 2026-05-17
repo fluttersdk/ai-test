@@ -1,13 +1,29 @@
-# V3 — MCP-only Single-Channel Flutter Web LLM-Agent Control
+# V3 — MCP-only Single-Channel Flutter LLM-Agent Control
 
 > Architecture deep-dive. For day-to-day usage see the package READMEs.
 
 ## Mission
 
 Give an LLM agent (Claude, Cursor, Windsurf, custom) the ability to drive a
-running Flutter web app A-Z without DOM scraping, without Playwright, without
-a screen mirror. Single MCP surface; everything flows through the Dart VM
+running Flutter app A-Z without DOM scraping, without Playwright, without a
+screen mirror. Single MCP surface; everything flows through the Dart VM
 Service.
+
+## Supported targets
+
+| Target | `--device` | Status | Notes |
+|---|---|---|---|
+| Chrome (web) | `chrome` (default) | first-class | D6 Chrome reaper + PID capture active |
+| macOS desktop | `macos` | supported | reaper skipped; same `ext.aitest.*` surface |
+| Linux desktop | `linux` | supported | reaper skipped |
+| Windows desktop | `windows` | supported | reaper skipped (POSIX-only anyway) |
+| iOS simulator / device | `<UDID>` | supported | reaper skipped; VM Service over USB/network |
+| Android emulator / device | `<serial>` | supported | reaper skipped; VM Service over adb |
+
+All targets use the same plugin source. The CLI's `--device` flag forwards
+straight to `flutter run -d <device>`; the host gate is `kDebugMode` so every
+debug build (web/desktop/mobile) gets the plugin and every release build
+tree-shakes it out.
 
 ## Three packages
 
@@ -21,22 +37,17 @@ Service.
 
 ```dart
 // uptizm-app/lib/main.dart
-if (kIsWeb && kDebugMode) {
+if (kDebugMode) {
   AiTestPluginV3.install();
 }
-runApp(
-  kIsWeb && kDebugMode
-      ? RepaintBoundary(
-          key: AiTestPluginV3.rootRepaintBoundaryKey,
-          child: app,
-        )
-      : app,
-);
+runApp(kDebugMode ? RepaintBoundary(child: app) : app);
 ```
 
-The compile-time `kIsWeb && kDebugMode` outer guard lets dart2js prove the
-entire branch dead in release. Release builds emit zero V3 bytes (verified
-via tree-shake grep in Step 26).
+The compile-time `kDebugMode` guard lets dart2js (web) and dart2native
+(desktop / mobile AOT) prove the entire branch dead in release. Release
+builds emit zero V3 bytes on every platform (verified via tree-shake grep
+in Step 26). The legacy `kIsWeb` clause was removed once `--device=<non-web>`
+landed.
 
 ## Why VM Service custom extensions, not DOM mirror
 
@@ -60,8 +71,9 @@ agent (LLM, IDE)
   ▼  stdio JSON-RPC (MCP protocol)
 ai-test-mcp (TypeScript, packages/ai_test_node/src/cli.ts)
   │
-  ▼  ws://127.0.0.1:<port>/<token>/ws (Dart VM Service Protocol)
-flutter run -d chrome --no-dds --dart-define=AI_TEST=1 --web-port=3100
+  ▼  ws://<host>:<port>/<token>/ws (Dart VM Service Protocol)
+flutter run -d <chrome|macos|linux|windows|ios-udid|android-serial> \
+  --no-dds --dart-define=AI_TEST=1 [--web-port=3100 (chrome only)]
   │
   ▼  developer.registerExtension dispatch
 ai_test_flutter (Dart) ext.aitest.*
